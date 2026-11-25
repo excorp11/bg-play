@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BG Play vs Open Sage</title>
+<link rel="manifest" href="app.webmanifest">
+<meta name="theme-color" content="#6b5a43">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<style>
+  /* VOICE: a quiet club table; the board is the whole picture.
+     IDEA: the BG Position Analyzer's board, now played on: same felt, points and pip chips.
+     PICTURE: the board fills the first screen; controls sit beside (landscape) or below (portrait).
+     COLOUR and TYPE: felt and walnut, blue and ivory checkers, one orange accent for moves; system sans.
+     LAYOUT: board left / panel right when sideways, board top / panel below when upright. */
+  :root {
+    color-scheme: light dark;
+    --bg: #efece4; --panel: #fbfaf7; --ink: #1d1d1b; --muted: #6b6a65; --line: #dcd8cd;
+    --accent: #2f5d8a; --accent-ink: #fff; --good: #2e7d4f; --warn: #b5651d; --bad: #b23a3a; --hint: #e8871e; --arrow: #e8871e;
+    --c-blue: #2f5d8a; --c-blue-edge: #1e4166; --c-blue-ink: #fff; --c-white: #fbfaf7; --c-white-edge: #6f6c63; --c-white-ink: #222;
+    --me: var(--c-blue); --me-edge: var(--c-blue-edge); --me-ink: var(--c-blue-ink); --opp: var(--c-white); --opp-edge: var(--c-white-edge); --opp-ink: var(--c-white-ink);
+    --felt: #d9cfb7; --frame: #6b5a43; --pt1: #a8875c; --pt2: #e9e0cc; --sel: #e7eef6;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) {
+    --bg: #151514; --panel: #1f1f1d; --ink: #ecebe6; --muted: #a3a199; --line: #34332f;
+    --accent: #6fa3d8; --accent-ink: #0d1b28; --good: #6cc392; --warn: #e3a25f; --bad: #e07a7a;
+    --c-blue: #5b8fc4; --c-blue-edge: #9cc0e6; --c-white: #efece4; --c-white-edge: #8f8b80;
+    --felt: #3a352b; --frame: #22201b; --pt1: #7a6243; --pt2: #575043; --sel: #22303d; } }
+  :root[data-theme=dark] {
+    --bg: #151514; --panel: #1f1f1d; --ink: #ecebe6; --muted: #a3a199; --line: #34332f;
+    --accent: #6fa3d8; --accent-ink: #0d1b28; --good: #6cc392; --warn: #e3a25f; --bad: #e07a7a;
+    --c-blue: #5b8fc4; --c-blue-edge: #9cc0e6; --c-white: #efece4; --c-white-edge: #8f8b80;
+    --felt: #3a352b; --frame: #22201b; --pt1: #7a6243; --pt2: #575043; --sel: #22303d; }
+  body.swapc { --me: var(--c-white); --me-edge: var(--c-white-edge); --me-ink: var(--c-white-ink); --opp: var(--c-blue); --opp-edge: var(--c-blue-edge); --opp-ink: var(--c-blue-ink); }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; min-width: 0; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #app { position: fixed; inset: 0; display: flex; gap: 8px;
+    padding: max(5px, env(safe-area-inset-top)) max(5px, env(safe-area-inset-right)) max(5px, env(safe-area-inset-bottom)) max(5px, env(safe-area-inset-left)); }
+  #boardWrap { flex: 1; position: relative; }
+  #board { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #board.shake { animation: shake .28s; }
+  @keyframes shake { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+  #board .pulse rect { animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .55; } }
+  #side { width: clamp(240px, 33vw, 340px); display: flex; flex-direction: column; gap: 7px; overflow-y: auto; overscroll-behavior: contain; }
+  .bar-top { display: flex; align-items: center; gap: 6px; }
+  .bar-top .title { flex: 1; font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .score { font-size: 12.5px; color: var(--muted); }
+  .status { font-size: 16px; font-weight: 650; line-height: 1.3; }
+  .status.good { color: var(--good); }
+  .run { color: var(--accent); } .status.run::after { content: ' ●'; animation: pulse 1s infinite; }
+  .hint { font-size: 12px; color: var(--muted); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  .card p { margin: 4px 0 8px; }
+  button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; min-height: 40px; cursor: pointer; white-space: nowrap; }
+  button.icon { min-width: 42px; min-height: 36px; font-size: 18px; line-height: 1; padding: 0 8px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
+  button.dbl { border-color: var(--warn); color: var(--warn); font-weight: 650; }
+  button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid var(--hint); outline-offset: 1px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; } .row > * { flex: 1 1 0; }
+  .row.big button { min-height: 50px; font-size: 16px; }
+  .btnlink { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-height: 40px; padding: 0 12px; }
+  .btnlink.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
+  .muted { color: var(--muted); } .small { font-size: 12px; } .bad { color: var(--bad); } .good { color: var(--good); }
+  .botbox { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px 9px; font-size: 13px; }
+  .botbox summary { cursor: pointer; } .botbox[open] summary { margin-bottom: 4px; }
+  table.mini { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12.5px; margin: 4px 0; }
+  table.mini th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11.5px; border-bottom: 1px solid var(--line); padding: 2px 4px; }
+  table.mini td { padding: 3px 4px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.mini td:not(:first-child), table.mini th:not(:first-child) { text-align: right; }
+  table.mini tr.sel td { background: var(--sel); font-weight: 650; }
+  table.errs tr { cursor: pointer; } table.errs td:nth-child(2), table.errs td:nth-child(3) { text-align: left; white-space: normal; }
+  .er .erbig { font-size: 26px; font-weight: 750; font-variant-numeric: tabular-nums; }
+  .key { font-size: 13px; } .key.bad { color: var(--bad); } .key.good { color: var(--good); }
+  .xgid { margin: 6px 0; font-size: 11px; overflow-wrap: anywhere; } .xgid code { font-family: ui-monospace, monospace; }
+  .ov { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; z-index: 10; overflow-y: auto; overscroll-behavior: contain;
+    padding: max(6px, env(safe-area-inset-top)) max(6px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left)); }
+  .ov.open { display: flex; }
+  .sheet { background: var(--panel); border-radius: 14px; padding: 12px 14px; margin: auto; max-height: 96vh; max-height: 96dvh; overflow-y: auto; width: min(560px, 96vw); }
+  @media (orientation: landscape) and (min-width: 640px) { .sheet { width: min(900px, 96vw); } .mgrid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; align-items: start; } }
+  .mhead { display: flex; align-items: center; justify-content: space-between; } .mhead h3 { margin: 0; font-size: 17px; }
+  .sheet h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { flex: 1; border: 0; border-radius: 0; min-height: 40px; padding: 0 4px; } .seg button + button { border-left: 1px solid var(--line); }
+  .tograw { display: flex; flex-direction: column; gap: 2px; }
+  .tog { display: flex; align-items: center; gap: 8px; min-height: 38px; cursor: pointer; }
+  .tog input { width: 20px; height: 20px; accent-color: var(--accent); }
+  .field { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
+  .field button { min-width: 44px; }
+  .stepper { display: inline-flex; align-items: center; gap: 8px; } .stepper b { min-width: 2ch; text-align: center; font-size: 16px; }
+  .saved { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .sv { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+  textarea.paste { width: 100%; min-height: 120px; font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); color: var(--ink); margin: 6px 0; }
+  .toast { position: fixed; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 9px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 30; max-width: 92vw; text-align: center; }
+  .toast.show { opacity: .94; }
+  #update { position: fixed; left: 50%; top: max(8px, env(safe-area-inset-top)); transform: translateX(-50%); z-index: 31; display: none; }
+  #update.show { display: block; }
+  @media (orientation: portrait) {
+    #app { flex-direction: column; gap: 6px; }
+    #boardWrap { flex: none; width: 100%; height: min(88vw, 60vh); }
+    #side { width: 100%; flex: 1 1 0; min-height: 0; }
+  }
+  @media (orientation: landscape) and (max-height: 420px) { .row.big button { min-height: 42px; } .status { font-size: 15px; } #side { gap: 5px; } }
+  @media (prefers-reduced-motion: reduce) { #board.shake, #board .pulse rect, .status.run::after { animation: none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="boardWrap"><svg id="board" role="img" aria-label="Backgammon board"></svg></div>
+  <div id="side" aria-live="polite"></div>
+</div>
+<div class="ov" id="ovMenu" onclick="if (event.target === this) closeMenu()"><div class="sheet" id="menu"></div></div>
+<div class="toast" id="toast"></div>
+<button id="update" class="primary" onclick="location.reload()">A new version is ready: tap to reload</button>
+<script>window.BGP_TARGET="pwa";window.BGP_VERSION="2026.11.25-253e37f1";window.BGP_TILE_URL="https://claude.ai/artifact/Sr472PM5geY9AhTPzhwWHt";window.BGP_TRIGGER="";</script>
+<script src="rules.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
