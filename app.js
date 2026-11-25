@@ -1127,6 +1127,10 @@ async function scoreSaved(e, games) {
 }
 function cancelScoring() { closeMenu(); }
 let RVW = [];   // the review's engine workers (made here, see showReview)
+// The review runs six engine workers (the user's choice, 2026-11-25; fewer on a device with fewer cores): a rollout covers
+// the top four plays plus your move, and with four workers the fifth waited for the others, doubling the time. A number
+// chosen in the review's own menu wins. BG Play's engine is stopped while the review is open, so the two never add up.
+const RV_WORKERS = Math.max(2, Math.min(6, navigator.hardwareConcurrency || 6));
 // Claude for the review's Explain and Go deeper. The frame's objects (the options, its AbortSignal, Go deeper's tools,
 // images) belong to another JavaScript realm, and the platform's sample() refuses them ("options must be a plain
 // object"), so each call is rebuilt here, in this page's realm, before it goes on.
@@ -1173,7 +1177,7 @@ async function showReview(items, title, at) {
   closeMenu(); driveToken++; poolGen++;
   const pool = ENG.pool; ENG.pool = null; ENG.state = 'review'; if (pool) pool.terminate();
   window.BGP_RV = { items, title, at: at || null, target: TARGET, explain: TARGET === 'tile', claude: TARGET === 'tile' ? rvClaude() : null,
-    weights: ENG.weights, manifest: ENG.manifest, book: BOOK, workers: S.set.workers, opts: { swapColour: !!S.set.swapColour, mirror: !!S.set.mirror },
+    weights: ENG.weights, manifest: ENG.manifest, book: BOOK, workers: RV_WORKERS, opts: { swapColour: !!S.set.swapColour, mirror: !!S.set.mirror },
     botName: 'Open Sage', close: closeReview, worker: () => { const w = new Worker('pa-worker.js'); RVW.push(w); return w; } };
   const f = document.createElement('iframe'); f.id = 'rvFrame'; f.title = title; f.setAttribute('allow', 'clipboard-write');
   document.body.appendChild(f);

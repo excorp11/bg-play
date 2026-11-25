@@ -478,7 +478,7 @@ function openMenu() {
 }
 async function copyX() { try { await navigator.clipboard.writeText(toXgid()); toast('XGID copied'); } catch (e) { toast('Copy blocked: select the box and copy'); } }
 function loadX() { try { fromXgid($('xgidBox').value); closeOv(); saveState(); render(); toast('Position loaded'); } catch (e) { toast(e.message); } }
-async function setWorkers(n) { if (n === S.workers) return; S.workers = n; saveState(); openMenu(); if (weightsBuf) { await restartPool(); if (S.mode === 'results') backToSetup(); toast(`Engine restarted with ${n} worker${n > 1 ? 's' : ''}`); } }
+async function setWorkers(n) { if (n === S.workers) return; S.workers = n; S.workersSet = true; saveState(); openMenu(); if (weightsBuf) { await restartPool(); if (S.mode === 'results') backToSetup(); toast(`Engine restarted with ${n} worker${n > 1 ? 's' : ''}`); } }
 function fsBtn() { return document.fullscreenElement ? `<button class="icon" onclick="toggleFull()" aria-label="Exit full screen" title="Exit full screen" style="font-size:16px;min-width:36px">⤡</button>` : ''; }
 let fsLastErr = '';
 async function toggleFull() {
@@ -1922,7 +1922,7 @@ function tryFull(ev) {
 // (BG Play's review: no automatic full screen inside the game's frame)
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !document.fullscreenElement) fsArmed = true; });
 document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) fsArmed = true; render(); if ($('ovMenu').classList.contains('open')) openMenu(); });   // keep the menu's Full screen label true
-function saveState() { try { localStorage.setItem('bgplay-rv', JSON.stringify({ workers: S.workers, roPreset: S.roPreset })); } catch (e) {} }
+function saveState() { try { localStorage.setItem('bgplay-rv', JSON.stringify({ v: 2, workers: S.workersSet ? S.workers : 0, roPreset: S.roPreset })); } catch (e) {} }
 // Opens on the starting position; only the settings carry over. The last analysed position is kept
 // under its own key (editing the board doesn't overwrite it), offered under Clear at start-up and in the ⋯ menu.
 function saveLast() {}
@@ -1932,7 +1932,9 @@ function savedState() {
 }
 function loadState() {
   let r = null; try { r = JSON.parse(localStorage.getItem('bgplay-rv') || 'null'); } catch (e) {}
-  S.workers = (r && r.workers) || (RVX && RVX.workers) || S.workers; if (r && r.roPreset) S.roPreset = r.roPreset;
+  // workers: one chosen in this menu, else BG Play's choice for the review (six), else the analyzer's default
+  if (r && r.v === 2 && r.workers) { S.workers = r.workers; S.workersSet = true; } else S.workers = (RVX && RVX.workers) || S.workers;
+  if (r && r.roPreset) S.roPreset = r.roPreset;
   S.offerLast = false; applyLook(); return;
   let s = null; try { s = JSON.parse(localStorage.getItem('bgpa-state') || 'null'); } catch (e) {}
   if (s) { if (s.game) S.game = s.game; if (s.workers) S.workers = s.workers; if (s.roPreset) S.roPreset = s.roPreset; S.colorSwap = !!s.colorSwap; S.mirror = !!s.mirror; S.impMode = s.impMode || 'fast'; S.palette = fixPalette(s.palette); }
