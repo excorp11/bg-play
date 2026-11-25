@@ -29,6 +29,8 @@ Your games stay in this browser's storage on the device; nothing is sent anywher
 
 The review page (`review.html`, `review.js`, `pa-worker.js`) is the BG Position Analyzer's page and engine worker.
 The engine files (`engine.js`, `engine.wasm`, `weights-bundle.wasm`, `manifest.json`) are a WebAssembly build of
-Open Sage by Mark Higgins, under the Mozilla Public License 2.0 (`LICENSE-OpenSage.txt`). The source of the build's
-entry point is in `src/tile_engine.cpp`, with the build steps in `src/build.sh`; the rest of the engine's source is at
-https://github.com/markbgsage/bgsage.
+Open Sage by Mark Higgins (release 2.1.20261122), under the Mozilla Public License 2.0 (`LICENSE-OpenSage.txt`). The
+source of the build's entry point is in `src/tile_engine.cpp`, with the build steps in `src/build.sh`. One of the
+engine's files is changed for WebAssembly: `src/neural_net.cpp` (made by `src/wasm_sigmoid.py`) gives the network's
+hidden layer the same sigmoid as the engine's x86 build, so the numbers match the Python package. The rest of the
+engine's source is at https://github.com/markbgsage/bgsage (tag v2.1.20261122).

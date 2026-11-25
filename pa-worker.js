@@ -3,6 +3,10 @@
 // Boards: 26 ints from the side on roll ([0] opponent's bar, [1..24] points, + = side on roll, [25] own bar).
 // g (game/cube): {cv, co, jac, bea, a1, a2, cr}: cube value; owner 0 centred / 1 side on roll / 2 opponent;
 // Jacoby, beavers; away scores (0 = money); Crawford.
+// The engine: Open Sage 2.1.20261122 built for WebAssembly with the accurate hidden-layer sigmoid
+// (claude/engine-update.md). engine.js and engine.wasm are one pair: the ?v= keeps a cache from mixing an old one
+// with a new one. Change ENGINE_V with every new engine build.
+const ENGINE_V = '2.1.20261122.1';
 let M = null, buf = { b: 0, c: 0 }, curId = 0;
 const ROLLS = []; for (let a = 1; a <= 6; a++) for (let b = a; b <= 6; b++) ROLLS.push([a, b]);
 
@@ -326,8 +330,8 @@ function notation(before, after, d1, d2) {
 // ------------------------------------------------------------- init and dispatch
 async function init(weights, manifest) {
   const t0 = performance.now();
-  importScripts('engine.js');
-  M = await createEngine({ locateFile: (f) => f });
+  importScripts('engine.js?v=' + ENGINE_V);
+  M = await createEngine({ locateFile: (f) => f + '?v=' + ENGINE_V });
   const u8 = new Uint8Array(weights);
   M.FS.mkdir('/w');
   const paths = [];
