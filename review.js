@@ -82,8 +82,8 @@ function geometry(W, H) {
   return { W, H, m, x0, lh, pw, bw, tw, zh, ph, r, colX, barX, trayX, top, bot };
 }
 // Swap direction mirrors the board: Blue's home board on the left, the bear-off tray on the left.
-const pointCol = (p) => { const r = p >= 13 ? { c: p - 13, top: true } : { c: 12 - p, top: false }; if (S.mirror) r.c = 11 - r.c; return r; };
-function colPoint(c, isTop) { if (S.mirror) c = 11 - c; return isTop ? 13 + c : 12 - c; }
+const pointCol = (p) => { const r = p >= 13 ? { c: p - 13, top: true } : { c: 12 - p, top: false }; if (S.mirror) r.c = 11 - r.c; if (rvFlip()) r.top = !r.top; return r; };
+function colPoint(c, isTop) { if (S.mirror) c = 11 - c; if (rvFlip()) isTop = !isTop; return isTop ? 13 + c : 12 - c; }
 
 function drawBoard() {
   const svg = $('board');
@@ -107,7 +107,7 @@ function drawBoard() {
     const y1 = top ? G.top : G.bot, y2 = top ? G.top + ph : G.bot - ph;
     s += `<polygon points="${x + 1},${y1} ${x + G.pw - 1},${y1} ${x + G.pw / 2},${y2}" fill="${p % 2 ? 'var(--pt1)' : 'var(--pt2)'}"/>`;
     const ly = top ? G.m + G.lh * 0.72 : G.H - G.m - G.lh * 0.22;
-    s += `<text x="${x + G.pw / 2}" y="${ly}" font-size="${Math.min(12, G.lh * 0.7)}" font-weight="600" text-anchor="middle" fill="#efe6d2">${p}</text>`;
+    s += `<text x="${x + G.pw / 2}" y="${ly}" font-size="${Math.min(12, G.lh * 0.7)}" font-weight="600" text-anchor="middle" fill="#efe6d2">${rvFlip() ? 25 - p : p}</text>`;
   }
   // checkers
   const chk = (cx, cy, mine, label, cls) => {
@@ -130,17 +130,19 @@ function drawBoard() {
   const cs = Math.min(G.bw - 4, 24), fs = Math.min(13, G.bw * 0.4), cw = Math.min(G.bw - 4, fs * 2.3), ch = fs * 1.45;
   const ext = cs / 2 + 3 + ch;                       // how far the cube + chip stack reaches from the middle
   const barOff = Math.max(G.zh * 1.9, ext + G.r + 2);
-  if (b[0]) s += chk(bcx, mid - barOff, false, b[0] > 1 ? b[0] : '');
-  if (b[25]) s += chk(bcx, mid + barOff, true, b[25] > 1 ? b[25] : '');
+  const fl = rvFlip() ? -1 : 1;
+  if (b[0]) s += chk(bcx, mid - fl * barOff, false, b[0] > 1 ? b[0] : '');
+  if (b[25]) s += chk(bcx, mid + fl * barOff, true, b[25] > 1 ? b[25] : '');
   { const [pm, po] = pips(b);
     const cube = (y, v) => `<rect x="${bcx - cs / 2}" y="${y}" width="${cs}" height="${cs}" rx="4" fill="#f4efe2" stroke="#222"/>` +
       `<text x="${bcx}" y="${y + cs * 0.68}" font-size="${cs * 0.48}" font-weight="700" text-anchor="middle" fill="#222">${v}</text>`;
     if (!S.cube.owner) s += cube(mid - cs / 2, 64);
     const half = S.cube.owner ? 4 : cs / 2 + 3;      // with no cube in the middle the chips close up
-    s += `<rect x="${bcx - cw / 2}" y="${mid - half - ch}" width="${cw}" height="${ch}" rx="4" fill="var(--opp)" stroke="var(--opp-edge)"/>`;
-    s += `<text x="${bcx}" y="${mid - half - ch * 0.27}" font-size="${fs}" font-weight="700" text-anchor="middle" fill="var(--opp-ink)">${po}</text>`;
-    s += `<rect x="${bcx - cw / 2}" y="${mid + half}" width="${cw}" height="${ch}" rx="4" fill="var(--me)" stroke="var(--me-edge)"/>`;
-    s += `<text x="${bcx}" y="${mid + half + ch * 0.73}" font-size="${fs}" font-weight="700" text-anchor="middle" fill="var(--me-ink)">${pm}</text>`;
+    const [rvU, rvUP, rvD, rvDP] = rvFlip() ? ['me', pm, 'opp', po] : ['opp', po, 'me', pm];   // the top chip is the top side's
+    s += `<rect x="${bcx - cw / 2}" y="${mid - half - ch}" width="${cw}" height="${ch}" rx="4" fill="var(--${rvU})" stroke="var(--${rvU}-edge)"/>`;
+    s += `<text x="${bcx}" y="${mid - half - ch * 0.27}" font-size="${fs}" font-weight="700" text-anchor="middle" fill="var(--${rvU}-ink)">${rvUP}</text>`;
+    s += `<rect x="${bcx - cw / 2}" y="${mid + half}" width="${cw}" height="${ch}" rx="4" fill="var(--${rvD})" stroke="var(--${rvD}-edge)"/>`;
+    s += `<text x="${bcx}" y="${mid + half + ch * 0.73}" font-size="${fs}" font-weight="700" text-anchor="middle" fill="var(--${rvD}-ink)">${rvDP}</text>`;
     G.cubeBox = S.cube.owner ? null : [mid - cs / 2, mid + cs / 2];
     if (S.cube.owner) G.ownedCube = cube; }
   // trays: borne-off (inferred)
@@ -155,16 +157,17 @@ function drawBoard() {
     if (n) t += `<text x="${tx}" y="${isTop ? G.top + 2 + n * slab + 11 : G.bot - 2 - n * slab - 4}" font-size="10" font-weight="700" text-anchor="middle" fill="#efe6d2">${n}</text>`;
     return t;
   };
-  s += tray(offOpp, true, false) + tray(offMe, false, true);
+  s += rvFlip() ? tray(offOpp, false, false) + tray(offMe, true, true) : tray(offOpp, true, false) + tray(offMe, false, true);
   s += `<text x="${tx}" y="${mid + 4}" font-size="9" text-anchor="middle" fill="#efe6d2" opacity=".8">OFF</text>`;
   // dice on the board (right half, middle) and the cube on the bar
-  if (S.decision === 'checker' && S.dice && S.mode === 'setup') {
+  if (S.decision === 'checker' && S.dice && S.mode === 'setup' && !S.rvItem) {
     const ds = Math.min(G.zh * 0.9, G.pw * 0.8), dx = G.colX(8) + G.pw / 2;
     S.dice.forEach((d, i) => { s += dieSvg(dx + i * (ds + 6) - (ds + 6) / 2 - ds / 2, mid - ds / 2, ds, d); });
   }
+  if (S.rvItem && S.decision === 'checker' && S.dice) s += rvDice(mid);   // the roll, under the arrows
   if (S.mode === 'results' && S.preview) s += previewMarks(S.board, b) + arrows(S.board, b, S.preview.name);
   // an owned cube sits at its owner's end of the bar
-  if (S.cube.owner) s += G.ownedCube(S.cube.owner === 1 ? G.bot - cs - 4 : G.top + 4, S.cube.value);
+  if (S.cube.owner) s += G.ownedCube((S.cube.owner === 1) !== rvFlip() ? G.bot - cs - 4 : G.top + 4, S.cube.value);
   svg.innerHTML = s;
 }
 function dieSvg(x, y, s, v) {
@@ -184,15 +187,16 @@ function parseMove(name) {
   return out;
 }
 function checkerXY(p, k, mine) {
-  if (p === 25) return [G.barX + G.bw / 2, G.H / 2 + G.zh * 1.1];
-  if (p === 0) return [G.trayX + 2 + (G.tw - 2) / 2, G.bot - G.zh * 0.8];
+  if (p === 25) return [G.barX + G.bw / 2, G.H / 2 + (rvFlip() ? -1 : 1) * G.zh * 1.1];
+  if (p === 0) return [G.trayX + 2 + (G.tw - 2) / 2, rvFlip() ? G.top + G.zh * 0.8 : G.bot - G.zh * 0.8];
   const { c, top } = pointCol(p), kk = Math.max(0, Math.min(4, k));
   return [G.colX(c) + G.pw / 2, top ? G.top + G.zh * (kk + 0.5) : G.bot - G.zh * (kk + 0.5)];
 }
 function arrows(before, after, name) {
   const steps = parseMove(name), usedFrom = {}, usedTo = {}, totalTo = {};
   steps.forEach((s) => { totalTo[s.to] = (totalTo[s.to] || 0) + 1; });
-  let t = `<defs><marker id="ah" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e8871e" stroke="#5a2d00" stroke-width="1"/></marker></defs>`;
+  const AC = rvArrowColour() || ['#e8871e', '#5a2d00'];   // the review colours the arrows by the play's cost
+  let t = `<defs><marker id="ah" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${AC[0]}" stroke="${AC[1]}" stroke-width="1"/></marker></defs>`;
   for (const s of steps) {
     const nFrom = s.from === 25 ? before[25] : Math.max(0, before[s.from]);
     const kFrom = nFrom - 1 - (usedFrom[s.from] = (usedFrom[s.from] || 0) + 1) + 1;
@@ -203,8 +207,8 @@ function arrows(before, after, name) {
     const sx = x1 + dx / len * G.r * 0.6, sy = y1 + dy / len * G.r * 0.6, ex = x2 - dx / len * G.r * 0.95, ey = y2 - dy / len * G.r * 0.95;
     const bend = Math.min(40, len * 0.18), mx = (sx + ex) / 2 - dy / len * bend, my = (sy + ey) / 2 + dx / len * bend;
     const d = `M${sx},${sy} Q${mx},${my} ${ex},${ey}`;
-    t += `<path d="${d}" fill="none" stroke="#5a2d00" stroke-width="5" stroke-linecap="round" opacity=".55"/>`;
-    t += `<path d="${d}" fill="none" stroke="#e8871e" stroke-width="3" stroke-linecap="round" marker-end="url(#ah)"/>`;
+    t += `<path d="${d}" fill="none" stroke="${AC[1]}" stroke-width="5" stroke-linecap="round" opacity=".55"/>`;
+    t += `<path d="${d}" fill="none" stroke="${AC[0]}" stroke-width="3" stroke-linecap="round" marker-end="url(#ah)"/>`;
   }
   return t;
 }
@@ -220,7 +224,7 @@ function previewMarks(before, after) {
       const cy = top ? G.top + G.zh * (k + 0.5) : G.bot - G.zh * (k + 0.5);
       t += `<circle cx="${cx}" cy="${cy}" r="${G.r - 1}" fill="none" stroke="var(--me)" stroke-width="1.6" stroke-dasharray="3 3"/>`; } }
   }
-  if (after[0] > before[0]) t += `<circle cx="${G.barX + G.bw / 2}" cy="${G.H / 2 - G.zh * 1.1}" r="${G.r + 1.5}" fill="none" stroke="var(--bad)" stroke-width="2.5" stroke-dasharray="4 3"/>`;
+  if (after[0] > before[0]) t += `<circle cx="${G.barX + G.bw / 2}" cy="${G.H / 2 - (rvFlip() ? -1 : 1) * G.zh * 1.1}" r="${G.r + 1.5}" fill="none" stroke="var(--bad)" stroke-width="2.5" stroke-dasharray="4 3"/>`;
   return t;
 }
 
@@ -235,7 +239,7 @@ function hit(px, py) {
   };
   if (px >= G.barX && px < G.barX + G.bw) {
     if (G.cubeBox && py >= G.cubeBox[0] - 4 && py <= G.cubeBox[1] + 4) return { kind: 'cube' };
-    return { kind: 'bar', mine: py > G.H / 2 };
+    return { kind: 'bar', mine: (py > G.H / 2) !== rvFlip() };
   }
   const c = inCols(px); if (c < 0) return null;
   if (py < G.top) return { kind: 'clear', p: colPoint(c, true) };
@@ -401,6 +405,7 @@ function rgbWord(c) {
 function swapDirection() { S.mirror = !S.mirror; saveState(); render(); toast(`Your home board is now on the ${S.mirror ? 'left' : 'right'}`); }
 // Colour names in the text sent to Claude follow the colours on screen (also inside data keys like blue_wins).
 function landRing() {
+  const ac = rvArrowColour(); if (ac) return ac[0];   // the landing rings match the arrows
   const f = S.palette && (S.colorSwap ? S.palette.light.fill : S.palette.dark.fill), c = f && hexRgb(f);
   if (!c) return 'var(--good)';
   const w = rgbWord(c); return w === 'Green' || w === 'Teal' ? '#e8871e' : 'var(--good)';
@@ -831,7 +836,8 @@ function probTable(P, when) {
 function cubeVerdict(L, cube, game) {
   // Equities from the doubler's side, per unit of the current cube (+1 = opponent passes).
   const owned = cube.owner === 1, d = owned ? 'redouble' : 'double', D = owned ? 'Redouble' : 'Double';
-  if (cube.owner === 2) return { title: `${rvWho(2)} owns the cube`, rows: [['No double', L.equity_nd, true]], you: `${rvWho(1)} can't double`, youCost: '', opp: '—', oppCost: '' };
+  if (REVIEW && cube.owner !== 2 && game.type === 'match' && game.crawford) return { title: 'Crawford game: no doubling', rows: [['No double', L.equity_nd, true]], you: `can't double`, youCost: '', opp: '—', oppCost: '' };
+  if (cube.owner === 2) return { title: `${rvWho(2)} ${rvWho(2) === 'You' ? 'own' : 'owns'} the cube`, rows: [['No double', L.equity_nd, true]], you: `can't double`, youCost: '', opp: '—', oppCost: '' };
   const nd = L.equity_nd, dp = L.equity_dp;
   const take = L.is_beaver ? L.equity_dt / 2 : L.equity_dt;      // the engine reports D/B in equity_dt when the opponent should beaver
   const beaverOK = game.type === 'money' && game.beaver;        // beavers apply to redoubles too
@@ -892,7 +898,7 @@ function rolloutBar() {
 
 // ------------------------------------------------------------- results panel
 function sideResults() {
-  const r = S.res, title = r.kind === 'checker' ? `To play ${S.pos.dice[0]}-${S.pos.dice[1]}` : `Cube decision`;
+  const r = S.res, title = S.rvItem && S.rvItem.dice ? rvTabs() : r.kind === 'checker' ? `To play ${S.pos.dice[0]}-${S.pos.dice[1]}` : `Cube decision`;
   if (S.rvItem && RV.follow) rvSync();
   const head = `${rvBar()}<div class="bar-top"><div class="title">${title}${statusLine()}</div>${fsBtn()}<button class="icon" onclick="openMenu()" aria-label="More">⋯</button></div>`;
   const busyRO = r.rollout && !r.rollout.done;
@@ -2011,7 +2017,7 @@ try { new ResizeObserver(() => { const r = $('board').getBoundingClientRect(), k
 // Items (from BG Play): {id, who: 'me'|'bot' (on roll), board (its view), dice | null, cube {value, owner 0|1|2},
 // game (this page's S.game, from the side on roll), played: {after, name, by} | {action, by}, answer?: {action, by},
 // cost (your decision's 4-ply cost in the game, or null), err (your error of 0.020 or more), label}.
-const RV = { items: (RVX && RVX.items) || [], idx: 0, mode: 'all', follow: true, cache: new Map(), timer: 0, started: false,
+const RV = { items: (RVX && RVX.items) || [], idx: 0, mode: 'all', view: 'move', follow: true, cache: new Map(), timer: 0, started: false,
   canExplain: !!(RVX && RVX.explain), bot: (RVX && RVX.botName) || 'Open Sage' };
 const rvList = () => (RV.mode === 'errors' ? RV.items.filter((x) => x.err) : RV.items);
 // Labels for the side on roll (1) and the other side (2): You and Open Sage.
@@ -2023,34 +2029,69 @@ function rvBoot() {
   RV.idx = Math.max(0, i);
   rvShow(rvList()[RV.idx]);
 }
-// The item's position on the board, in BG Play's colours (each side keeps its colour; the side on roll is at the bottom).
+// The item's position on the board, in BG Play's colours and the way the game was played: each side keeps its colour,
+// you at the bottom and Open Sage at the top whoever is on roll (the analyzer works from the side on roll, so rvFlip()
+// turns its board over for Open Sage's turns). A roll has two views: the move ('move') and the cube decision before the
+// roll ('cube'), switched by swiping the list sideways or by the two tabs; each position opens on the move.
 function rvShow(it) {
   if (!it) return;
-  S.board = it.board.slice(); S.dice = it.dice ? it.dice.slice() : null; S.decision = it.dice ? 'checker' : 'cube';
+  const cv = !!it.dice && RV.view === 'cube';
+  S.board = it.board.slice(); S.dice = it.dice && !cv ? it.dice.slice() : null; S.decision = S.dice ? 'checker' : 'cube';
   S.cube = { ...it.cube }; S.game = { ...it.game };
   const o = (RVX && RVX.opts) || {}, sw = !!o.swapColour;
   S.colorSwap = it.who === 'me' ? sw : !sw; S.mirror = !!o.mirror; applyLook();
-  S.rvItem = it; S.rvPlayed = it.played && it.played.after ? it.played.after.slice() : null; RV.follow = true;
+  S.rvItem = it; S.rvPlayed = !cv && it.played && it.played.after ? it.played.after.slice() : null; RV.follow = true;
+}
+function rvFlip() { return !!(S.rvItem && S.rvItem.who === 'bot'); }
+const rvKey = (it) => it.id + (it.dice && RV.view === 'cube' ? ':cube' : '');
+const rvCubeView = () => !!(S.rvItem && S.rvItem.dice && RV.view === 'cube');
+function rvView(v) {
+  const it = S.rvItem; if (!it || !it.dice || v === RV.view) return;
+  try { localStorage.setItem('bgplay-rv-swipe', '1'); } catch (e) {}
+  rvStash(); RV.view = v; rvPreview();
+}
+function rvTabs() {
+  const d = S.rvItem.dice, cv = rvCubeView();
+  return `<span class="seg rvtabs"><button class="${cv ? '' : 'on'}" onclick="rvView('move')">To play ${d[0]}-${d[1]}</button><button class="${cv ? 'on' : ''}" onclick="rvView('cube')">Cube before the roll</button></span>`;
+}
+// The roll on the board, in the roller's colours: yours on the right half, Open Sage's on the left (as in the game).
+function rvDice(mid) {
+  const ds = Math.min(G.zh * 0.95, G.pw * 0.82, 40), gap = ds * 0.25, cx = S.rvItem.who === 'me' ? G.colX(9) : G.colX(3), y = mid - ds / 2;
+  const die = (x, v) => {
+    const P = { 1: [[.5, .5]], 2: [[.27, .27], [.73, .73]], 3: [[.27, .27], [.5, .5], [.73, .73]], 4: [[.27, .27], [.73, .27], [.27, .73], [.73, .73]],
+      5: [[.27, .27], [.73, .27], [.5, .5], [.27, .73], [.73, .73]], 6: [[.27, .25], [.73, .25], [.27, .5], [.73, .5], [.27, .75], [.73, .75]] }[v] || [];
+    return `<rect x="${x}" y="${y}" width="${ds}" height="${ds}" rx="${ds * 0.18}" fill="var(--me)" stroke="var(--me-edge)" stroke-width="1.4"/>` +
+      P.map(([a, c]) => `<circle cx="${x + a * ds}" cy="${y + c * ds}" r="${ds * 0.085}" fill="var(--me-ink)"/>`).join('');
+  };
+  return `<g class="rvdice">${die(cx - ds - gap / 2, S.dice[0])}${die(cx + gap / 2, S.dice[1])}</g>`;
+}
+// The arrows' colour (the user's rule, 2026-11-25) by the shown play's cost: green the best play, grey not best but under
+// 0.020, yellow an error (0.020 to 0.080), red a blunder (0.080 or more): the project's error and blunder thresholds.
+function rvArrowColour() {
+  if (!S.rvItem || !S.preview || !S.res || S.res.kind !== 'checker' || !S.res.plays.length) return null;
+  const L = ranked(), i = L.findIndex((p) => sameB(p.b, S.preview.after)); if (i < 0) return null;
+  const e = i === 0 ? 0 : Math.max(0, L[i].err);
+  return e < 0.0005 ? ['#2e9e4f', '#0e3a1c'] : e < 0.020 ? ['#a4a4a4', '#3a3a3a'] : e < 0.080 ? ['#f2c230', '#5c4500'] : ['#e0413a', '#5a0f0b'];
 }
 function rvLoad() {
   const it = rvList()[RV.idx]; if (!it) { render(); return; }
   rvShow(it);
-  const c = RV.cache.get(it.id);
+  const c = RV.cache.get(rvKey(it));
   if (c) { gen++; S.mode = 'results'; S.explain = null; S.pos = c.pos; S.res = c.res; S.sel = 0; pickPreview(); render(); return; }
   analyze();
 }
 // A finished analysis is kept, so going back to a position shows it at once.
-function rvStash() { const it = S.rvItem, r = S.res; if (it && r && r.done && !r.waiting && (!r.rollout || r.rollout.done) && S.pos) RV.cache.set(it.id, { pos: S.pos, res: r }); }
+function rvStash() { const it = S.rvItem, r = S.res; if (it && r && r.done && !r.waiting && (!r.rollout || r.rollout.done) && S.pos) RV.cache.set(rvKey(it), { pos: S.pos, res: r }); }
 function rvGo(d) {
   const n = rvList().length; if (!n) return;
   const i = Math.max(0, Math.min(n - 1, RV.idx + d)); if (i === RV.idx) return;
-  rvStash(); RV.idx = i; rvPreview();
+  rvStash(); RV.idx = i; RV.view = 'move'; rvPreview();
 }
 // Shows the position at once and analyses it after a short pause, so a run of taps skips the positions passed.
 function rvPreview() {
   const it = rvList()[RV.idx]; if (!it) { render(); return; }
   gen++; S.explain = null; clearTimeout(RV.timer); rvShow(it);
-  if (RV.cache.has(it.id) || !RV.started) { if (RV.started) rvLoad(); else render(); return; }
+  if (RV.cache.has(rvKey(it)) || !RV.started) { if (RV.started) rvLoad(); else render(); return; }
   S.mode = 'results'; S.preview = null;
   S.pos = { board: S.board.slice(), dice: S.dice ? S.dice.slice() : null, cube: { ...S.cube }, game: { ...S.game }, g: gameG() };
   S.res = { kind: S.dice ? 'checker' : 'cube', depth: 0, t: [], plays: [], levels: {}, rollout: null, waiting: true };
@@ -2059,12 +2100,12 @@ function rvPreview() {
 }
 function rvMode(m) {
   if (m === RV.mode) return;
-  const cur = S.rvItem; rvStash(); RV.mode = m;
+  const cur = S.rvItem; rvStash(); RV.mode = m; RV.view = 'move';
   const list = rvList(); let i = cur ? list.findIndex((x) => x.id === cur.id) : -1;
   if (i < 0 && cur) { const at = RV.items.indexOf(cur); i = list.findIndex((x) => RV.items.indexOf(x) >= at); if (i < 0) i = list.length - 1; }
   RV.idx = Math.max(0, i); rvPreview();
 }
-function rvReload() { gen++; S.explain = null; if (S.rvItem) RV.cache.delete(S.rvItem.id); if (engineState === 'ready') rvLoad(); }
+function rvReload() { gen++; S.explain = null; if (S.rvItem) RV.cache.delete(rvKey(S.rvItem)); if (engineState === 'ready') rvLoad(); }
 function rvClose() { clearTimeout(RV.timer); try { if (S.explain && S.explain.abort) S.explain.abort(); } catch (e) {} try { if (pool) pool.terminate(); } catch (e) {} if (RVX && RVX.close) RVX.close(); }
 function rvSync() { if (!S.rvPlayed || !S.res || S.res.kind !== 'checker') return; const i = ranked().findIndex((p) => sameB(p.b, S.rvPlayed)); if (i >= 0) S.sel = i; }
 function rvForce(cands) { if (!S.rvPlayed || !S.res || !S.res.plays) return; const p = S.res.plays.find((x) => sameB(x.b, S.rvPlayed)); if (p && !cands.includes(p)) cands.push(p); }
@@ -2082,22 +2123,24 @@ function rvWait() {
 }
 // What was played in the game at a cube decision, and what it cost, from this analysis.
 function rvCubePlayed(L) {
-  const it = S.rvItem; if (!it || it.dice || !L || !it.played) return '';
+  const it = S.rvItem, cv = rvCubeView(); if (!it || !L || (!cv && (it.dice || !it.played))) return '';
   const g = S.pos.game, nd = L.equity_nd, dp = L.equity_dp, take = L.is_beaver ? L.equity_dt / 2 : L.equity_dt;
   const ans = { Take: take, Pass: dp }; if (g.type === 'money' && g.beaver) ans.Beaver = 2 * take;
   const doubled = Math.min(...Object.values(ans)), best = Math.max(nd, doubled), owned = S.pos.cube.owner === 1;
-  const fmt = (c) => (c < 0.0005 ? 'right' : `−${c.toFixed(3)}`), who = (side) => (side === 'me' ? 'You' : RV.bot), p = it.played, out = [];
-  if (S.pos.cube.owner === 2) return '';
+  const fmt = (c) => (c < 0.0005 ? 'right' : `−${c.toFixed(3)}`), who = (side) => (side === 'me' ? 'You' : RV.bot), out = [];
+  const p = cv ? { action: 'No double', by: it.who } : it.played;   // before a roll: the side rolled without doubling
+  if (S.pos.cube.owner === 2 || (cv && g.type === 'match' && g.crawford)) return cv ? `<div class="verdict2 rvplayed">In the game: ${who(it.who)} rolled ${it.dice[0]}-${it.dice[1]} (no cube access)</div>` : '';
   out.push(p.action === 'Double' ? `${who(p.by)} ${owned ? 'redoubled' : 'doubled'} (${fmt(best - doubled)})` : `${who(p.by)} didn't ${owned ? 'redouble' : 'double'} (${fmt(best - nd)})`);
-  if (it.answer && ans[it.answer.action] != null) out.push(`${who(it.answer.by)} ${{ Take: 'took', Pass: 'passed', Beaver: 'beavered' }[it.answer.action]} (${fmt(ans[it.answer.action] - doubled)})`);
-  return `<div class="verdict2 rvplayed">In the game: ${out.join('; ')}</div>`;
+  if (!cv && it.answer && ans[it.answer.action] != null) out.push(`${who(it.answer.by)} ${{ Take: 'took', Pass: 'passed', Beaver: 'beavered' }[it.answer.action]} (${fmt(ans[it.answer.action] - doubled)})`);
+  return `<div class="verdict2 rvplayed">In the game: ${out.join('; ')}${cv ? `, then rolled ${it.dice[0]}-${it.dice[1]}` : ''}</div>`;
 }
 // For Explain and Go deeper: who Blue and White are, and what was played (Blue/White words; the prompt renames them).
 function rvContext() {
   const it = S.rvItem; if (!it) return '';
   const eng = `${RV.bot}, the engine the user played`, blue = it.who === 'me' ? 'the user' : eng, white = it.who === 'me' ? eng : 'the user';
   let did = '';
-  if (it.dice && it.played) did = ` In the game Blue played ${it.played.name}.`;
+  if (rvCubeView()) did = ` This is the cube decision before Blue's roll; in the game Blue ${S.pos && S.pos.cube.owner === 2 ? 'had no access to the cube and' : 'did not double, then'} rolled ${it.dice[0]}-${it.dice[1]} and played ${it.played.name}.`;
+  else if (it.dice && it.played) did = ` In the game Blue played ${it.played.name}.`;
   else if (it.played) {
     did = ` In the game Blue ${it.played.action === 'Double' ? 'doubled' : 'did not double'}`;
     if (it.answer) did += ` and White ${{ Take: 'took', Pass: 'passed', Beaver: 'beavered' }[it.answer.action]}`;
@@ -2121,6 +2164,21 @@ function rvMenu() {
     <div class="row" style="margin-top:12px"><button class="primary" onclick="closeOv()">Done</button></div>`;
   $('ovMenu').classList.add('open');
 }
+// Swiping the list (or the cube table) sideways switches a roll between its move and the cube decision before it.
+(() => {
+  const el = $('side'); if (!el) return;
+  let x0 = 0, y0 = 0, t0 = 0, on = false;
+  el.addEventListener('touchstart', (e) => {
+    const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; t0 = Date.now();
+    on = e.touches.length === 1 && !S.explain && !!(S.rvItem && S.rvItem.dice) && !!(e.target.closest && e.target.closest('.list, .cubebox, .pt, .spacer, .bar-top'));
+  }, { passive: true });
+  el.addEventListener('touchend', (e) => {
+    if (!on) return; on = false;
+    const t = e.changedTouches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+    if (Math.abs(dx) >= 45 && Math.abs(dx) > 1.5 * Math.abs(dy) && Date.now() - t0 < 1000) rvView(RV.view === 'cube' ? 'move' : 'cube');
+  }, { passive: true });
+})();
+function rvHint() { try { if (!localStorage.getItem('bgplay-rv-swipe') && RV.items.some((x) => x.dice)) setTimeout(() => toast('Swipe the list sideways for the cube decision before the roll', 3500), 1500); } catch (e) {} }
 document.addEventListener('keydown', (ev) => {
   if (document.querySelector('.ov.open') || S.explain || (ev.target && /INPUT|TEXTAREA/.test(ev.target.tagName))) return;
   if (ev.key === 'ArrowRight') { rvGo(1); ev.preventDefault(); } else if (ev.key === 'ArrowLeft') { rvGo(-1); ev.preventDefault(); } else if (ev.key === 'Escape') rvClose();
@@ -2129,4 +2187,5 @@ loadState();
 rvBoot();
 render();
 loadEngine();
+rvHint();
 
