@@ -680,7 +680,8 @@ function drawBoard() {
   // arrows: Open Sage's last move (or a reviewed decision's plays)
   const v = S.ui.view;
   if (v && v.arrows) for (const a of v.arrows) s += arrowsSvg(a.steps, a.mine, a.colour, a.before);
-  else if (gm && gm.last && gm.last.who === 'bot' && gm.phase !== 'opening' && (gm.onRoll === 'me' || gm.phase === 'over')) s += arrowsSvg(gm.last.steps, false, 'var(--arrow)', gm.last.before);
+  // Open Sage's last move: its arrows show until you roll or double (the user's rule, 2026-11-25), and when the game ends
+  else if (gm && gm.last && gm.last.who === 'bot' && ((gm.phase === 'preroll' && gm.onRoll === 'me') || gm.phase === 'over')) s += arrowsSvg(gm.last.steps, false, 'var(--arrow)', gm.last.before);
   // dice and the cube being offered
   G.diceBox = null;
   const ds = Math.min(G.zh * 0.95, G.pw * 0.82, 40);
@@ -1126,6 +1127,38 @@ async function scoreSaved(e, games) {
 }
 function cancelScoring() { closeMenu(); }
 let RVW = [];   // the review's engine workers (made here, see showReview)
+// Claude for the review's Explain and Go deeper. The frame's objects (the options, its AbortSignal, Go deeper's tools,
+// images) belong to another JavaScript realm, and the platform's sample() refuses them ("options must be a plain
+// object"), so each call is rebuilt here, in this page's realm, before it goes on.
+function rvClaude() {
+  if (!window.claude || !window.claude.use) return null;
+  let real = null;
+  const get = async () => real || (real = await window.claude.use('sample'));
+  const plain = (x) => (x == null ? x : JSON.parse(JSON.stringify(x)));
+  const sample = async (input, opts) => {
+    const f = await get();
+    if (!f) throw Object.assign(new Error('Claude is not available to this tile'), { code: 'not_granted' });
+    const o = {};
+    for (const k of Object.keys(opts || {})) {
+      const v = opts[k];
+      if (k === 'signal') {
+        if (v) { const ac = new AbortController(); if (v.aborted) ac.abort(); else v.addEventListener('abort', () => ac.abort(), { once: true }); o.signal = ac.signal; }
+      } else if (k === 'onText') { if (typeof v === 'function') o.onText = (u) => v({ text: u && u.text, delta: u && u.delta }); }
+      else if (k === 'tools') {
+        o.tools = (v || []).map((t) => {
+          const x = { name: String(t.name), description: String(t.description || ''), execute: async (input) => { const r = await t.execute(plain(input)); return typeof r === 'string' ? r : plain(r); } };
+          if (t.inputSchema) x.inputSchema = plain(t.inputSchema);
+          return x;
+        });
+      } else if (k === 'images') o.images = (v || []).map((b) => new Blob([b], { type: b.type }));
+      else if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) o[k] = v;
+      else o[k] = plain(v);
+    }
+    return f(typeof input === 'string' ? input : plain(input), o);
+  };
+  sample.limits = async () => { const f = await get(); return f && f.limits ? plain(await f.limits()) : { images: false }; };
+  return { use: async (name) => (name === 'sample' && (await get()) ? sample : null) };
+}
 async function showReview(items, title, at) {
   // The review's script goes into the frame inline, and its engine workers are made by this page (BGP_RV.worker): a frame
   // written with document.write isn't served by the offline app's service worker, so anything it fetched itself (its
@@ -1139,7 +1172,7 @@ async function showReview(items, title, at) {
   } catch (err) { toast('The review page didn\'t load: ' + (err.message || err), 4000); return; }
   closeMenu(); driveToken++; poolGen++;
   const pool = ENG.pool; ENG.pool = null; ENG.state = 'review'; if (pool) pool.terminate();
-  window.BGP_RV = { items, title, at: at || null, target: TARGET, explain: TARGET === 'tile', claude: TARGET === 'tile' && window.claude ? window.claude : null,
+  window.BGP_RV = { items, title, at: at || null, target: TARGET, explain: TARGET === 'tile', claude: TARGET === 'tile' ? rvClaude() : null,
     weights: ENG.weights, manifest: ENG.manifest, book: BOOK, workers: S.set.workers, opts: { swapColour: !!S.set.swapColour, mirror: !!S.set.mirror },
     botName: 'Open Sage', close: closeReview, worker: () => { const w = new Worker('pa-worker.js'); RVW.push(w); return w; } };
   const f = document.createElement('iframe'); f.id = 'rvFrame'; f.title = title; f.setAttribute('allow', 'clipboard-write');

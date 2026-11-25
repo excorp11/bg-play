@@ -105,9 +105,9 @@ function drawBoard() {
   for (let p = 1; p <= 24; p++) {
     const { c, top } = pointCol(p), x = G.colX(c);
     const y1 = top ? G.top : G.bot, y2 = top ? G.top + ph : G.bot - ph;
-    s += `<polygon points="${x + 1},${y1} ${x + G.pw - 1},${y1} ${x + G.pw / 2},${y2}" fill="${p % 2 ? 'var(--pt1)' : 'var(--pt2)'}"/>`;
+    s += `<polygon points="${x + 1},${y1} ${x + G.pw - 1},${y1} ${x + G.pw / 2},${y2}" fill="${(rvFlip() ? 25 - p : p) % 2 ? 'var(--pt1)' : 'var(--pt2)'}"/>`;
     const ly = top ? G.m + G.lh * 0.72 : G.H - G.m - G.lh * 0.22;
-    s += `<text x="${x + G.pw / 2}" y="${ly}" font-size="${Math.min(12, G.lh * 0.7)}" font-weight="600" text-anchor="middle" fill="#efe6d2">${rvFlip() ? 25 - p : p}</text>`;
+    s += `<text x="${x + G.pw / 2}" y="${ly}" font-size="${Math.min(12, G.lh * 0.7)}" font-weight="600" text-anchor="middle" fill="#efe6d2">${p}</text>`;
   }
   // checkers
   const chk = (cx, cy, mine, label, cls) => {
