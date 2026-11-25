@@ -132,6 +132,23 @@
       found.sort((a, b) => a.length - b.length || a.slice(0, -1).filter((s) => s.hit).length - b.slice(0, -1).filter((s) => s.hit).length);
       return found[0];
     }
+    // Tap on a point that holds none of your checkers (empty, or an opposing blot): the two single-die moves that make
+    // it, each checker going straight there by one die, as if each had been tapped (4-2 at the start: tap the 4 point
+    // = 8/4 6/4). The die shown first is tried first. null when no such pair keeps the turn legal.
+    makePoint(p) {
+      if (!(p >= 1 && p <= 24) || this.board[p] > 0 || this.board[p] < -1) return null;
+      const rem = this.remaining(); if (rem.length < 2) return null;
+      const orders = this.doubles ? [[rem[0], rem[0]]] : [[rem[0], rem[1]], [rem[1], rem[0]]];
+      for (const [a, b] of orders) {
+        const src = (d) => (this.board[25] > 0 ? 25 : p + d);
+        const m1 = src(a) <= 25 ? this.allowed(src(a), a) : null; if (!m1 || m1.to !== p) continue;
+        this.apply(m1);
+        const m2 = src(b) <= 25 ? this.allowed(src(b), b) : null;
+        this.undo();
+        if (m2 && m2.to === p) return [m1, m2];
+      }
+      return null;
+    }
     apply(m) { this.steps.push({ ...m, before: this.board }); this.board = m.board; }
     undo() { const s = this.steps.pop(); if (s) this.board = s.before; return s; }
     // Destinations for a checker that is being dragged (for highlighting).
@@ -257,7 +274,166 @@
     return out.join('\n') + '\n';
   }
 
+  // Reads back exactly the layout matText writes, and nothing else (the tile's paste check, and the reviews of saved
+  // games). Throws an Error naming the first thing that doesn't fit. Returns {head, length, games: [{n, players,
+  // score: [p1, p2], events}]}, events as matText takes them.
+  const HEAD_KEYS = ['Site', 'Match ID', 'Player 1', 'Player 2', 'EventDate', 'EventTime', 'Variation', 'Jacoby', 'Beavers', 'Crawford', 'Engine'];
+  function parseMat(text) {
+    if (typeof text !== 'string') throw new Error('not text');
+    if (text.length > 200000) throw new Error('too long for a BG Play game');
+    if (/[^\x20-\x7e\n]/.test(text)) throw new Error('characters a BG Play game file never has');
+    const head = {}, games = []; let length = null, cur = null, lineNo = 0;
+    const fail = (why) => { throw new Error(`line ${lineNo}: ${why}`); };
+    const tok = (s, side) => {
+      let m;
+      if ((m = /^([1-6])([1-6]):((?: (?:25|1[0-9]|2[0-4]|[1-9])\/(?:2[0-4]|1[0-9]|[0-9]))*)$/.exec(s))) {
+        const steps = m[3].trim() ? m[3].trim().split(' ').map((x) => x.split('/').map(Number)) : [];
+        if (steps.length > 4) fail('more than four steps');
+        return { side, type: 'roll', dice: [+m[1], +m[2]], steps };
+      }
+      if ((m = /^Doubles => (\d{1,5})$/.exec(s))) return { side, type: 'double', value: +m[1] };
+      if ((m = /^Beavers => (\d{1,5})$/.exec(s))) return { side, type: 'beaver', value: +m[1] };
+      if (s === 'Takes') return { side, type: 'take' };
+      if (s === 'Drops') return { side, type: 'drop' };
+      if ((m = /^Wins (\d{1,5}) points?$/.exec(s))) return { side, type: 'win', points: +m[1] };
+      return fail(`not a BG Play move: "${s.slice(0, 30)}"`);
+    };
+    for (const line of text.split('\n')) {
+      lineNo++;
+      if (!line.trim()) continue;
+      let m;
+      if (line.startsWith(';')) {
+        if (games.length || length !== null) fail('a header after the moves');
+        if (!(m = /^; \[([A-Za-z0-9 ]{1,20}) "([^"\[\]]{0,80})"\]$/.exec(line))) fail('not a header line');
+        if (!HEAD_KEYS.includes(m[1]) || m[1] in head) fail(`unexpected header ${m[1]}`);
+        head[m[1]] = m[2]; continue;
+      }
+      if ((m = /^ (\d{1,2}) point match$/.exec(line))) { if (length !== null || games.length) fail('a second match line'); length = +m[1]; continue; }
+      if ((m = /^ Game (\d{1,3})$/.exec(line))) {
+        if (length === null) fail('a game before the match line');
+        if (+m[1] !== games.length + 1) fail('games out of order');
+        cur = { n: +m[1], players: null, score: null, events: [] }; games.push(cur); continue;
+      }
+      if (!cur) fail('moves before the first game');
+      if (!cur.players) {
+        if (!(m = /^ (\S{1,20}) : (\d{1,2}) +(\S{1,20}) : (\d{1,2})$/.exec(line))) fail('not a score line');
+        cur.players = [m[1], m[3]]; cur.score = [+m[2], +m[4]]; continue;
+      }
+      if (!(m = /^( {0,2}\d{1,3}\) | {5})(.*)$/.exec(line))) fail('not a move line');
+      const body = m[2], left = body.slice(0, 28).trim(), right = body.length > 28 ? body.slice(28).trim() : '';
+      if (body.length > 28 && body[28] !== ' ') fail('columns out of place');
+      if (left) cur.events.push(tok(left, 1));
+      if (right) cur.events.push(tok(right, 2));
+      if (!left && !right) fail('an empty move line');
+    }
+    if (length === null || !games.length) throw new Error('no games in it');
+    return { head, length, games };
+  }
+  // Plays the games of parseMat's result through the rules, checking every step. Side 1 is 'me' (q_game), side 2
+  // 'bot'. rules: {type: 'cash', jacoby, beavers} | {type: 'match', length}. Returns per game {n, rules, score: {me, bot},
+  // crawford, pos: [...], result}, pos in game order:
+  //   {type: 'roll', side, turn, before (the roller's view), dice [high, low], steps, after, name, n (legal plays), cube}
+  //   {type: 'nodouble', side: 'me', turn, board, cube}    your turns with cube access on which you rolled
+  //   {type: 'double', side, turn, board (the doubler's view), cube (before), value, answer: 'take'|'drop'|'beaver', beaver}
+  // cube: {value, owner: 0 | 'me' | 'bot'}. Turn numbers count every roll from the opening roll (turn 1).
+  function replayGames(parsed, rules) {
+    const out = []; let crawUsed = false;
+    const sideName = (s) => (s === 1 ? 'me' : 'bot');
+    parsed.games.forEach((G) => {
+      const score = { me: G.score[0], bot: G.score[1] }, len = rules.type === 'match' ? rules.length : 0;
+      let crawford = false;
+      if (G.crawford != null) { crawford = !!G.crawford; crawUsed = crawUsed || crawford; }   // a single game whose Crawford flag is known
+      else if (len && !crawUsed && (score.me === len - 1 || score.bot === len - 1) && !(score.me === len - 1 && score.bot === len - 1)) { crawford = true; crawUsed = true; }
+      const ctx = { crawfordGame: crawford, score };
+      let B = START.slice(), cube = { value: 1, owner: 0 }, turn = 0, pending = null, doubledThisTurn = 0, over = null;
+      const pos = [], fail = (why) => { throw new Error(`game ${G.n}: ${why}`); };
+      G.events.forEach((e, i) => {
+        if (over && e.type !== 'win') fail('moves after the end of the game');
+        const s = sideName(e.side), o = s === 'me' ? 'bot' : 'me';
+        if (pending && !['take', 'drop', 'beaver'].includes(e.type)) fail('a double with no answer');
+        if (e.type === 'roll') {
+          if (turn === 0 && e.dice[0] === e.dice[1]) fail('a double on the opening roll');
+          if (turn > 0 && pos.length && pos[pos.length - 1].type === 'roll' && pos[pos.length - 1].side === s) fail('the same side rolled twice');
+          turn++;
+          if (s === 'me' && turn > 1 && doubledThisTurn !== 1 && R_canDouble('me', cube, rules, ctx)) pos.push({ type: 'nodouble', side: 'me', turn, board: B.slice(), cube: { ...cube } });
+          doubledThisTurn = 0;
+          const before = s === 'me' ? B.slice() : flip(B), [d1, d2] = e.dice;
+          const lp = legalPlays(before, d1, d2);
+          // The steps are one checker and one die each; the board they lead to must be one of the roll's legal plays.
+          let bd = before.slice();
+          for (const [f, t] of e.steps) {
+            if (!(f >= 1 && f <= 25) || !(t >= 0 && t <= 24) || f <= t || f - t > 6 || bd[f] <= 0) fail(`turn ${turn}: an impossible step ${f}/${t}`);
+            bd[f]--;
+            if (t) { if (bd[t] < -1) fail(`turn ${turn}: a step onto a made point`); if (bd[t] === -1) { bd[t] = 0; bd[0]++; } bd[t]++; }
+          }
+          if (lp.max === 0 ? e.steps.length : !lp.plays.has(key(bd)) || e.steps.length !== lp.max) fail(`turn ${turn}: not a legal play for ${d1}-${d2}`);
+          pos.push({ type: 'roll', side: s, turn, before, dice: [Math.max(d1, d2), Math.min(d1, d2)], steps: e.steps, after: bd,
+            name: notation(before, bd, d1, d2), n: lp.plays.size, cube: { ...cube } });
+          B = s === 'me' ? bd : flip(bd);
+          const fin = finished(B); if (fin) over = { winner: fin.won > 0 ? 'me' : 'bot', kind: fin.kind, how: 'played', at: i };
+        } else if (e.type === 'double') {
+          if (turn === 0) fail('a double before the opening roll');
+          if (!R_canDouble(s, cube, rules, ctx)) fail(`turn ${turn + 1}: a double without access to the cube`);
+          if (e.value !== cube.value * 2) fail(`turn ${turn + 1}: the cube went to ${e.value}`);
+          if (pos.length && pos[pos.length - 1].type === 'roll' && pos[pos.length - 1].side === s) fail('a double after the same side rolled');
+          pending = { type: 'double', side: s, turn: turn + 1, board: s === 'me' ? B.slice() : flip(B), cube: { ...cube }, value: e.value };
+          pos.push(pending);
+        } else if (e.type === 'take' || e.type === 'drop' || e.type === 'beaver') {
+          if (!pending || pending.side === s) fail('an answer with no double');
+          if (e.type === 'drop') { pending.answer = 'drop'; over = { winner: pending.side, kind: 1, how: 'drop', at: i, value: pending.value / 2 }; pending = null; return; }
+          if (e.type === 'beaver') {
+            if (rules.type !== 'cash' || !rules.beavers) fail('a beaver where beavers are off');
+            if (e.value !== pending.value * 2) fail('a beaver to the wrong value');
+            pending.answer = 'beaver'; pending.beaver = e.value; cube = { value: e.value, owner: s };
+          } else { pending.answer = 'take'; cube = { value: pending.value, owner: s }; }
+          doubledThisTurn = pending.side === 'me' ? 1 : 2; pending = null;
+        } else if (e.type === 'win') {
+          if (i !== G.events.length - 1) fail('a win before the last move');
+          const w = s, pts = e.points;
+          if (over && over.winner !== w) fail('the wrong side wins');
+          if (over && over.how === 'played' && pts !== pointsFor(over.kind, cube, rules)) fail('the points don\'t match the result');
+          if (over && over.how === 'drop' && pts !== over.value) fail('the points don\'t match the pass');
+          if (!over) {   // a resignation
+            const ks = [1, 2, 3].map((k) => pointsFor(k, cube, rules)); if (!ks.includes(pts)) fail('the points of the resignation don\'t fit the cube');
+            over = { winner: w, kind: ks.indexOf(pts) + 1, how: 'resign', at: i };
+          }
+          over.points = pts;
+        }
+      });
+      if (pending) fail('a double with no answer');
+      out.push({ n: G.n, rules, score, crawford, pos, result: over && over.points ? over : null });
+    });
+    return out;
+  }
+  const R_canDouble = (side, cube, rules, ctx) => canDouble(side, cube, rules, { crawfordGame: ctx.crawfordGame, score: ctx.score });
+  // A pasted or saved BG Play game file, checked line by line and move by move. Returns {kind, ply, rules, parsed,
+  // games, id}, or throws. Only the layout BG Play writes passes: its site, player names, engine line and headers.
+  function checkBgPlayMat(text) {
+    const P = parseMat(text), h = P.head;
+    const want = (k, re) => { if (!re.test(h[k] || '')) throw new Error(`header ${k} isn't BG Play's`); };
+    want('Site', /^BG Play vs Open Sage$/); want('Match ID', /^bgp-[A-Za-z0-9_-]{4,40}$/); want('Player 1', /^q_game$/);
+    want('Player 2', /^OpenSage-[1-4]ply$/); want('EventDate', /^\d{4}\.\d{2}\.\d{2}$/); want('EventTime', /^\d{2}\.\d{2}$/);
+    want('Variation', /^Backgammon$/); want('Jacoby', /^(On|Off)$/); want('Beavers', /^(On|Off)$/); want('Crawford', /^(On|Off)$/);
+    want('Engine', /^Open Sage [1-4]-ply \(on-device WebAssembly\)$/);
+    const ply = +h['Player 2'].match(/(\d)ply/)[1];
+    if (+h.Engine.match(/(\d)-ply/)[1] !== ply) throw new Error('the engine line and Player 2 disagree');
+    for (const g of P.games) if (g.players[0] !== h['Player 1'] || g.players[1] !== h['Player 2']) throw new Error(`game ${g.n}: other player names`);
+    const rules = P.length ? { type: 'match', length: P.length } : { type: 'cash', jacoby: h.Jacoby === 'On', beavers: h.Beavers === 'On' };
+    if (!P.length && P.games.length !== 1) throw new Error('a cash game file holds one game');
+    if (P.length > 25 || P.games.length > 60) throw new Error('more games than a match holds');
+    const games = replayGames(P, rules);
+    games.forEach((g, i) => {
+      if (!g.result) throw new Error(`game ${g.n} has no result`);
+      if (P.length) {     // match scores carry from game to game
+        const nx = P.games[i + 1];
+        if (nx) { const s = { ...g.score }; s[g.result.winner] += g.result.points; if (nx.score[0] !== s.me || nx.score[1] !== s.bot) throw new Error(`game ${nx.n}: the score doesn't follow`); }
+        if (i === 0 && (g.score.me || g.score.bot)) throw new Error('the match doesn\'t start at 0-0');
+      }
+    });
+    return { kind: P.length ? 'match' : 'cash', ply, rules, parsed: P, games, id: h['Match ID'].slice(4) };
+  }
+
   const api = { START, ROLLS, flip, key, same, counts, pips, noContact, allHome, singleMoves, legalPlays, Turn, notation, stepsText,
-    finished, pointsFor, canDouble, xgid, matText };
+    finished, pointsFor, canDouble, xgid, matText, parseMat, replayGames, checkBgPlayMat };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.R = api;
 })(typeof self !== 'undefined' ? self : this);

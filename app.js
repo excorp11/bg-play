@@ -1,7 +1,8 @@
 // app.js: BG Play, a game against Open Sage on the device: cash games (Jacoby, beavers) with a session tally, or
-// matches with the Crawford rule; the bot plays at 1-4 ply; your decisions are analysed at 3-ply in the background
-// and your ER (XG's PR formula and decision counting) is shown when the game ends; games can be saved for the
-// project's full analysis. Rules: rules.js. Engine: worker.js (one Open Sage WebAssembly engine per worker).
+// matches with the Crawford rule; the bot plays at 1-4 ply; your decisions are analysed at 4-ply in the background
+// and your ER (XG's PR formula and decision counting) is shown when the game ends; a review steps through your
+// errors or every move with the BG Position Analyzer's display (review.html + review.js in a frame); games can be
+// saved for the project's full analysis. Rules: rules.js. Engine: worker.js (one Open Sage WebAssembly engine per worker).
 'use strict';
 const TARGET = window.BGP_TARGET || 'tile';          // 'tile' (Claude app) or 'pwa' (the offline home-screen app)
 const VERSION = window.BGP_VERSION || 'dev';
@@ -15,6 +16,8 @@ const eqs = (e) => (e >= 0 ? '+' : '−') + Math.abs(e).toFixed(3);
 const pct = (x) => (100 * x).toFixed(1) + '%';
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 function rollDie() { const a = new Uint8Array(1); for (;;) { crypto.getRandomValues(a); if (a[0] < 252) return 1 + (a[0] % 6); } }
+// A roll, shown higher die first (the user's rule, 2026-11-25).
+function rollPair() { const a = rollDie(), b = rollDie(); return [Math.max(a, b), Math.min(a, b)]; }
 const uid = () => { const a = new Uint8Array(6); crypto.getRandomValues(a); return Date.now().toString(36) + Array.from(a, (x) => x.toString(36).padStart(2, '0')).join('').slice(0, 8); };
 
 // ------------------------------------------------------------- settings and saved state
@@ -63,7 +66,11 @@ class Pool {
       const id = ++this.seq; this.cbs[id] = res; w.postMessage({ ...msg, id });
     }
   }
-  terminate() { this.workers.forEach((w) => w.terminate()); [...this.hi, ...this.lo].forEach(([, res]) => res({ ok: false, error: 'cancelled' })); this.hi = []; this.lo = []; }
+  // Stops the workers; every job queued or running ends as 'cancelled' (callers redo it after a restart).
+  terminate() {
+    this.workers.forEach((w) => w.terminate()); [...this.hi, ...this.lo].forEach(([, res]) => res({ ok: false, error: 'cancelled' })); this.hi = []; this.lo = [];
+    const cbs = this.cbs; this.cbs = {}; Object.values(cbs).forEach((cb) => cb({ ok: false, error: 'cancelled' }));
+  }
 }
 const ENG = { pool: null, state: 'loading', msg: 'Loading the engine…', weights: null, manifest: null };
 async function loadEngine() {
@@ -82,12 +89,19 @@ async function loadEngine() {
     await startPool();
   } catch (e) { ENG.state = 'error'; ENG.msg = 'The engine failed to load: ' + (e.message || e); renderSide(); }
 }
+let poolGen = 0;
 async function startPool() {
-  if (ENG.pool) ENG.pool.terminate();
+  const my = ++poolGen;
+  if (ENG.pool) { ENG.pool.terminate(); ENG.pool = null; }    // jobs sent meanwhile fail as 'engine not ready' and are redone
   ENG.state = 'loading'; ENG.msg = 'Starting the engine…'; renderSide();
   const p = new Pool(S.set.workers); await p.init(ENG.weights, ENG.manifest);
-  ENG.pool = p; ENG.state = 'ready'; ENG.msg = ''; renderSide(); drive();
+  if (my !== poolGen) { p.terminate(); return; }              // a later start, or a review that opened meanwhile, wins
+  ENG.pool = p; ENG.state = 'ready'; ENG.msg = '';
+  const gm = S.game;
+  if (gm) { hidden(gm, '_curDec', null); hidden(gm, '_cubePre', null); if (gm.phase !== 'over') for (const d of gm.decisions) if (!d.res) analyzeDecision(d, 'lo'); }
+  renderSide(); drive();
 }
+const stopped = (e) => /^(cancelled|engine not ready)$/.test(String((e && e.message) || e));
 async function job(msg, prio = 'hi') {
   if (!ENG.pool) throw new Error('engine not ready');
   const r = await ENG.pool.run(msg, prio); if (!r.ok) throw new Error(r.error); return r.result;
@@ -140,12 +154,14 @@ function bookFor(d) {
 // ------------------------------------------------------------- the game's context for the engine
 const other = (s) => (s === 'me' ? 'bot' : 'me');
 const sideBoard = (gm, side) => (side === 'me' ? gm.board.slice() : R.flip(gm.board));
-function gFor(gm, side) {
-  const r = gm.rules, c = gm.cube, co = c.owner === 0 ? 0 : c.owner === side ? 1 : 2;
+// The engine's context for `side` ('me' | 'bot'): cube value and owner (0 centred, 1 that side, 2 the other), rules, away scores.
+function gOf(r, score, crawford, c, side) {
+  const co = c.owner === 0 ? 0 : c.owner === side ? 1 : 2;
   if (r.type === 'cash') return { cv: c.value, co, jac: r.jacoby ? 1 : 0, bea: r.beavers ? 1 : 0, a1: 0, a2: 0, cr: 0 };
-  const mine = side === 'me' ? gm.score.me : gm.score.bot, theirs = side === 'me' ? gm.score.bot : gm.score.me;
-  return { cv: c.value, co, jac: 0, bea: 0, a1: r.length - mine, a2: r.length - theirs, cr: gm.crawford ? 1 : 0 };
+  const mine = side === 'me' ? score.me : score.bot, theirs = side === 'me' ? score.bot : score.me;
+  return { cv: c.value, co, jac: 0, bea: 0, a1: r.length - mine, a2: r.length - theirs, cr: crawford ? 1 : 0 };
 }
+const gFor = (gm, side) => gOf(gm.rules, gm.score, gm.crawford, gm.cube, side);
 const matchCtx = (gm) => ({ crawfordGame: !!gm.crawford, score: gm.score || { me: 0, bot: 0 } });
 const canDbl = (gm, side) => R.canDouble(side, gm.cube, gm.rules, matchCtx(gm));
 const beaversOn = (gm) => gm.rules.type === 'cash' && gm.rules.beavers;
@@ -173,22 +189,25 @@ async function rank(board, d1, d2, g, ply, prio, extra = []) {
 const cubeEval = (board, ply, g, prio = 'hi') => job({ cmd: 'cube', board, ply, g }, prio);
 const deepest = (c) => Math.max(...Object.keys(c.e).map(Number));
 
-// Your decisions, analysed at 3-ply in the background (book for turns 1-2). Kinds: M checker play; R rolled without
-// doubling (with access to the cube); D doubled; T took, P passed, B beavered (board: the doubler's view).
-const ER_PLY = 3, WINDOW = 0.200, FLAT = 0.001, LOW = -0.900;
-// The 3-ply ranking of a roll (shared by the decision and the auto-bearoff check; started while you think).
+// Your decisions, analysed at 4-ply in the background (book for turns 1-2); 3-ply before 2026-11-25, when the user moved
+// the project's reviews to a 4-ply screen. The auto-bearoff checks stay at 3-ply so that those rolls keep moving quickly.
+// Kinds: M checker play; R rolled without doubling (with access to the cube); D doubled; T took, P passed, B beavered
+// (board: the doubler's view).
+const ER_PLY = 4, AUTO_PLY = 3, WINDOW = 0.200, FLAT = 0.001, LOW = -0.900;
+// The ranking of a roll at `ply` (shared by the decision and the auto-bearoff check; started while you think).
 function hidden(o, k, v) { Object.defineProperty(o, k, { value: v, enumerable: false, writable: true, configurable: true }); return v; }
-function moveRank(d, prio) {
-  if (!d._rk) { const bk = bookFor(d); hidden(d, '_rk', rank(d.board, d.dice[0], d.dice[1], d.g, ER_PLY, prio, bk ? [bk.plays[0].b] : [])); }
-  return d._rk;
+function moveRank(d, prio, ply = ER_PLY) {
+  const k = '_rk' + (ply === ER_PLY ? '' : ply);
+  if (!d[k]) { const bk = bookFor(d), p = rank(d.board, d.dice[0], d.dice[1], d.g, ply, prio, bk ? [bk.plays[0].b] : []); p.catch(() => {}); hidden(d, k, p); }
+  return d[k];
 }
 async function evalAt(c, d, plies, prio) {
   await Promise.all(plies.filter((ply) => c.e[ply] == null).map((ply) => job({ cmd: 'eval', board: d.board, cand: c.b, ply, g: d.g }, prio).then((x) => { c.e[ply] = x.e; c.p[ply] = x.p; })));
 }
-// Best minus worst over every legal play: at 3-ply where the plays reached it, else at 2-ply over all of them (er.py's
+// Best minus worst over every legal play: at `ply` where the plays reached it, else at 2-ply over all of them (er.py's
 // 0.001 test: a roll whose plays all lie within 0.001 is no decision).
-async function playSpread(r, d, prio) {
-  const at3 = r.plays.filter((p) => p.e[ER_PLY] != null).map((p) => p.e[ER_PLY]);
+async function playSpread(r, d, prio, ply = ER_PLY) {
+  const at3 = r.plays.filter((p) => p.e[ply] != null).map((p) => p.e[ply]);
   let spread = Math.max(...at3) - Math.min(...at3);
   if (spread < FLAT && r.plays.length > at3.length) {
     await Promise.all(r.plays.map((c) => evalAt(c, d, [2], prio)));
@@ -206,7 +225,7 @@ function analyzeDecision(d, prio = 'lo') {
         const played = r.plays.find((p) => R.same(p.b, d.after));
         await evalAt(played, d, [2, ER_PLY], prio);
         const at3 = r.plays.filter((p) => p.e[ER_PLY] != null).sort((a, b) => b.e[ER_PLY] - a.e[ER_PLY]), best = at3[0];
-        let cost = Math.max(0, best.e[ER_PLY] - played.e[ER_PLY]), bestB = best.b, src = '3-ply';
+        let cost = Math.max(0, best.e[ER_PLY] - played.e[ER_PLY]), bestB = best.b, src = ER_PLY + '-ply';
         let spread = await playSpread(r, d, prio);
         if (bk && bk.plays.every((x) => r.plays.some((p) => R.same(p.b, x.b)))) {
           const listed = bk.plays.find((x) => R.same(x.b, d.after)), worst = bk.plays[bk.plays.length - 1].err;
@@ -216,7 +235,7 @@ function analyzeDecision(d, prio = 'lo') {
         }
         const cands = at3.slice(0, 5).map((c) => ({ b: c.b, e: c.e[ER_PLY], name: R.notation(d.board, c.b, d.dice[0], d.dice[1]) }));
         d.res = { cost, counted: r.plays.length > 1 && spread >= FLAT, spread, best: R.notation(d.board, bestB, d.dice[0], d.dice[1]), bestB, src, cands,
-          playedE: played.e[ER_PLY], n: r.plays.length };
+          playedE: played.e[ER_PLY], n: r.plays.length, ply: ER_PLY };
       } else if (d.k === 'R' || d.k === 'D') {
         const c = await (d._c || cubeEval(d.board, ER_PLY, d.g, prio)), nd = c.equity_nd, dt = c.equity_dt, dp = c.equity_dp;
         const doubled = Math.min(dt, dp), best = Math.max(nd, doubled);
@@ -227,14 +246,17 @@ function analyzeDecision(d, prio = 'lo') {
           else if (nd - dp > WINDOW) why = 'obvious too good'; else if (nd < LOW && dt < LOW) why = 'very negative';
         }
         const bestAct = doubled > nd + 1e-9 ? 'Double' : 'No double';
-        d.res = { cost: Math.max(0, cost), counted: !why, why, nd, dt, dp, beaver: c.is_beaver, best: bestAct, probs: c.probs };
+        d.res = { cost: Math.max(0, cost), counted: !why, why, nd, dt, dp, beaver: c.is_beaver, best: bestAct, probs: c.probs, ply: d._c3 ? AUTO_PLY : ER_PLY };
       } else {
         const c = await (d._c || cubeEval(d.board, ER_PLY, d.g, prio)), DT = c.is_beaver ? c.equity_dt / 2 : c.equity_dt;
         const E = { P: -c.equity_dp, T: -DT, B: d.g.bea ? -2 * DT : -Infinity };
         const best = Math.max(E.P, E.T, E.B), bestAct = best === E.B ? 'Beaver' : best === E.T ? 'Take' : 'Pass';
-        d.res = { cost: Math.max(0, best - E[d.k]), counted: true, E, best: bestAct, nd: c.equity_nd, dt: c.equity_dt, dp: c.equity_dp, beaver: c.is_beaver, probs: c.probs };
+        d.res = { cost: Math.max(0, best - E[d.k]), counted: true, E, best: bestAct, nd: c.equity_nd, dt: c.equity_dt, dp: c.equity_dp, beaver: c.is_beaver, probs: c.probs, ply: ER_PLY };
       }
-    } catch (e) { d.res = { cost: 0, counted: false, err: String(e.message || e) }; }
+    } catch (e) {
+      if (stopped(e)) { hidden(d, '_p', null); for (const k of ['_rk', '_rk' + AUTO_PLY, '_c']) if (d[k]) hidden(d, k, null); return null; }   // redone after the restart
+      d.res = { cost: 0, counted: false, err: String(e.message || e) };
+    }
     return d.res;
   })());
 }
@@ -322,7 +344,7 @@ async function openingRoll(token) {
 // The 3-ply cube analysis of the position before your roll (started as soon as it's your turn).
 function cubePre(gm) {
   const k = gm.id + ':' + gm.turnNo;
-  if (!gm._cubePre || gm._cubePre.k !== k) hidden(gm, '_cubePre', { k, p: cubeEval(gm.board.slice(), ER_PLY, gFor(gm, 'me'), 'lo') });
+  if (!gm._cubePre || gm._cubePre.k !== k) { const p = cubeEval(gm.board.slice(), ER_PLY, gFor(gm, 'me'), 'lo'); p.catch(() => {}); hidden(gm, '_cubePre', { k, p }); }
   return gm._cubePre.p;
 }
 async function userPreroll(token) {
@@ -331,7 +353,7 @@ async function userPreroll(token) {
   const pre = cubePre(gm);
   // Auto-bearoff: with no contact and all your checkers home, roll for you when doubling isn't a real decision.
   if (S.set.autoBear && R.noContact(gm.board) && R.allHome(gm.board)) {
-    const probe = { k: 'R', board: gm.board.slice(), g: gFor(gm, 'me') }; hidden(probe, '_c', pre);
+    const probe = { k: 'R', board: gm.board.slice(), g: gFor(gm, 'me') }; hidden(probe, '_c', cubeEval(gm.board.slice(), AUTO_PLY, gFor(gm, 'me'), 'hi')); hidden(probe, '_c3', true);
     analyzeDecision(probe, 'hi').then((res) => { if (!live(token) || gm.phase !== 'preroll' || gm.onRoll !== 'me') return; if (!res.counted && res.best === 'No double') userRoll(true); else renderAll(); });
   }
   renderAll();
@@ -339,7 +361,7 @@ async function userPreroll(token) {
 function userRoll(auto) {
   const gm = S.game; if (!gm || gm.phase !== 'preroll' || gm.onRoll !== 'me') return;
   if (canDbl(gm, 'me')) { const d = { k: 'R', turn: gm.turnNo + 1, board: gm.board.slice(), g: gFor(gm, 'me'), auto: !!auto }; hidden(d, '_c', cubePre(gm)); addDec(d); }
-  gm.dice = [rollDie(), rollDie()]; gm.turnNo++; gm.phase = 'move'; gm.turnSt = { order: gm.dice.slice(), steps: [] }; save(); drive();
+  gm.dice = rollPair(); gm.turnNo++; gm.phase = 'move'; gm.turnSt = { order: gm.dice.slice(), steps: [] }; save(); drive();
 }
 async function playSeq(t, seq) {
   busy = true;
@@ -360,10 +382,10 @@ async function userMoveStart(token) {
   const dec = curMoveDec(), rk = moveRank(dec, 'lo');
   if (S.set.autoBear && R.noContact(gm.board) && R.allHome(gm.board) && !t.steps.length) {
     renderAll();
-    let r, spread; try { r = await rk; spread = await playSpread(r, dec, 'hi'); } catch (e) { r = null; }
+    let r, spread; try { r = await moveRank(dec, 'hi', AUTO_PLY); spread = await playSpread(r, dec, 'hi', AUTO_PLY); } catch (e) { r = null; }
     if (!live(token) || gm.phase !== 'move' || t.steps.length) return;
     if (r && spread < FLAT) {
-      const best = r.plays.filter((p) => p.e[ER_PLY] != null).sort((a, b) => b.e[ER_PLY] - a.e[ER_PLY])[0] || r.plays[0];
+      const best = r.plays.filter((p) => p.e[AUTO_PLY] != null).sort((a, b) => b.e[AUTO_PLY] - a.e[AUTO_PLY])[0] || r.plays[0];
       const play = t.L.get(R.key(best.b)) || [...t.L.values()][0];
       await playSeq(t, play.seq); if (!live(token)) return;
       return finishUserMove(t, true);
@@ -441,7 +463,7 @@ async function botPreroll(token) {
       gm.offer = { by: 'bot', value: gm.cube.value * 2 }; gm.phase = 'offer';
       gm.events.push({ side: 2, type: 'double', value: gm.offer.value });
       gm.takeDec = { turn: gm.turnNo + 1, board: bb, g };
-      hidden(gm.takeDec, '_c', cubeEval(bb, ER_PLY, g, 'lo'));            // your take decision, analysed while you think
+      { const p = cubeEval(bb, ER_PLY, g, 'lo'); p.catch(() => {}); hidden(gm.takeDec, '_c', p); }   // your take decision, analysed while you think
       save(); renderAll(); return;
     }
   }
@@ -460,7 +482,7 @@ function botResignKind(p, gm) {
   return null;
 }
 function botRoll() {
-  const gm = S.game; gm.dice = [rollDie(), rollDie()]; gm.turnNo++; gm.phase = 'move'; save(); drive();
+  const gm = S.game; gm.dice = rollPair(); gm.turnNo++; gm.phase = 'move'; save(); drive();
 }
 async function botMove(token) {
   const gm = S.game, bb = sideBoard(gm, 'bot'), [d1, d2] = gm.dice, g = gFor(gm, 'bot');
@@ -502,7 +524,7 @@ async function botAnswerDouble(token) {
   if (ans === 'take') { gm.cube = { value: v * 2, owner: 'bot' }; gm.events.push({ side: 2, type: 'take' }); toast(`Open Sage takes: the cube is at ${v * 2}`); }
   else { gm.cube = { value: v * 4, owner: 'bot' }; gm.events.push({ side: 2, type: 'beaver', value: v * 4 }); toast(`Open Sage beavers: the cube is at ${v * 4}, Open Sage owns it`); }
   gm.offer = null; gm.phase = 'preroll'; gm.onRoll = 'me';
-  gm.dice = [rollDie(), rollDie()]; gm.turnNo++; gm.phase = 'move'; gm.turnSt = { order: gm.dice.slice(), steps: [] };   // the doubler rolls
+  gm.dice = rollPair(); gm.turnNo++; gm.phase = 'move'; gm.turnSt = { order: gm.dice.slice(), steps: [] };   // the doubler rolls
   save(); drive();
 }
 async function botAnswerResign(token) {
@@ -524,7 +546,7 @@ async function botAnswerResign(token) {
   if (accept) { gm.resign = null; return endGame('bot', R.pointsFor(k, gm.cube, gm.rules), 'resign', k); }
   toast('Open Sage declines your resignation'); gm.phase = gm.resign.back; gm.resign = null; save(); drive();
 }
-function engineFail(e) { status('The engine stopped: ' + (e.message || e)); renderAll(); toast('Engine error: tap Retry'); S.ui.retry = true; }
+function engineFail(e) { if (stopped(e)) return; status('The engine stopped: ' + (e.message || e)); renderAll(); toast('Engine error: tap Retry'); S.ui.retry = true; }
 function endGame(winner, points, how, kind) {
   const gm = S.game;
   gm.result = { winner, points, how, kind }; gm.phase = 'over'; gm.dice = null; gm.turnSt = null; gm.offer = null; gm.resign = null;
@@ -546,9 +568,10 @@ async function finishER() {
   erBusy = true;
   try {
     await Promise.all(gm.decisions.map((d) => analyzeDecision(d, 'hi')));
+    if (gm.decisions.some((d) => !d.res)) return;          // the engine was stopped (a review opened): done after the restart
     gm.er = computeER(gm.decisions);
     const rec = (gm.rules.type === 'cash' ? S.sess.games : S.match.games).find((x) => x.id === gm.id);
-    if (rec) rec.er = { er: gm.er.er, n: gm.er.n, total: gm.er.total };
+    if (rec) { rec.er = { er: gm.er.er, n: gm.er.n, total: gm.er.total }; rec.decs = compactDecs(gm.decisions, 1); }
     save(); renderAll();
   } finally { erBusy = false; }
 }
@@ -662,14 +685,15 @@ function drawBoard() {
   G.diceBox = null;
   const ds = Math.min(G.zh * 0.95, G.pw * 0.82, 40);
   if (gm && !v) {
-    // both home boards are on one half (the right, or the left with "Home board on the left"): every roll lands there
-    const homeX = S.set.mirror ? G.colX(3) : G.colX(9);
+    // your dice always on the right half of the board, Open Sage's on the left, whatever side the home boards are on
+    // (the user's rule, 2026-11-25); a cube being offered sits on the offerer's half
+    const rightX = G.colX(9), leftX = G.colX(3);
     if (gm.phase === 'opening' && gm.opening) {
-      const ry = mid - ds / 2, gap = ds * 0.6;
-      s += dieSvg(homeX - ds - gap / 2, ry, ds, gm.opening.bot, false, 'bot') + dieSvg(homeX + gap / 2, ry, ds, gm.opening.me, false, 'me');
+      const ry = mid - ds / 2;
+      s += dieSvg(leftX - ds / 2, ry, ds, gm.opening.bot, false, 'bot') + dieSvg(rightX - ds / 2, ry, ds, gm.opening.me, false, 'me');
     } else if (gm.dice && gm.phase === 'move') {
       const mine = gm.onRoll === 'me', who = mine ? 'me' : 'bot', t = mine ? getTurn() : null, order = t ? t.order : gm.dice;
-      const gap = ds * 0.25, cx = homeX, y = mid - ds / 2, x1 = cx - ds - gap / 2, x2 = cx + gap / 2;
+      const gap = ds * 0.25, cx = mine ? rightX : leftX, y = mid - ds / 2, x1 = cx - ds - gap / 2, x2 = cx + gap / 2;
       if (t && doubles(order)) {
         const left = t.remaining().length;
         s += dieSvg(x1, y, ds, order[0], left === 0, who) + dieSvg(x2, y, ds, order[1], left === 0, who);
@@ -681,7 +705,7 @@ function drawBoard() {
       if (mine) G.diceBox = [x1 - 6, y - 6, x2 + ds + 6, y + ds + 18];
     }
     if (gm.phase === 'offer' && gm.offer) {
-      const x = S.set.mirror ? G.colX(3) : G.colX(9), size = Math.min(ds * 1.15, 44);
+      const x = gm.offer.by === 'me' ? rightX : leftX, size = Math.min(ds * 1.15, 44);
       s += cubeAt(mid - size / 2, gm.offer.value, x, size, true);
     }
   }
@@ -800,6 +824,7 @@ async function onUp(ev) {
   if (!drag || ev.pointerId !== drag.id) {
     const h = GEO ? hitTest(x, y) : null;
     if (h && h.kind === 'dice') tapDice();
+    else if (h && h.kind === 'point') await tapMake(h.p);
     return;
   }
   const d = drag; drag = null;
@@ -817,6 +842,18 @@ async function onUp(ev) {
   if (!path) { if (to !== null && to !== d.from) shake(d.from); drawBoard(); return; }
   for (const m of path) t.apply(m);
   syncTurn(t); save(); afterStep();
+}
+// A tap on a point with none of your checkers: the two single-die moves that make it, played as two taps (the
+// user's request, 2026-11-25: 4-2 at the start, tap the 4 point = 8/4 6/4). Your own checkers there: a tap moves them.
+async function tapMake(p) {
+  if (!myTurnToMove()) return;
+  const t = getTurn(); if (!t || t.done || t.board[p] > 0) return;
+  const ms = t.makePoint(p);
+  if (!ms) { if (t.board[p] >= -1) toast(`No two checkers can make your ${p} point with ${t.order[0]}-${t.order[1]}`, 1600); return; }
+  busy = true;
+  try { for (const m of ms) { const mm = t.allowed(m.from, m.die); if (!mm) break; await animateUser(mm); t.apply(mm); syncTurn(t); drawBoard(); } }
+  finally { busy = false; }
+  save(); afterStep();
 }
 function afterStep() {
   const t = getTurn(); renderAll();
@@ -936,17 +973,18 @@ function resultText(gm) {
 function overPanel(gm) {
   let h = `<div class="status ${gm.result.winner === 'me' ? 'good' : ''}">${esc(resultText(gm))}</div>`;
   const pending = gm.decisions.filter((d) => !d.res).length;
-  if (!gm.er) h += `<div class="card"><div class="run">Working out your ER at 3-ply: ${plural(pending, 'decision')} left…</div></div>`;
+  if (!gm.er) h += `<div class="card"><div class="run">Working out your ER at ${ER_PLY}-ply: ${plural(pending, 'decision')} left…</div></div>`;
   else {
     const E = gm.er;
     h += `<div class="card er"><div class="erbig">ER ${E.er.toFixed(2)}</div><div class="small">${E.total.toFixed(3)} equity lost × 500 / ${plural(E.n, 'decision')} (${E.nMoves} checker plays, ${E.nCube} cube). Checker ${E.n ? (E.checker * 500 / E.n).toFixed(2) : '0.00'}, cube ${E.n ? (E.cube * 500 / E.n).toFixed(2) : '0.00'}.</div>`;
     const sk = Object.entries(E.skipped).map(([k, n]) => `${n} ${k}`).join(', ');
     if (sk) h += `<div class="muted small">Not counted: ${esc(sk)}.</div>`;
     const errs = E.errors.filter((d) => d.res.cost >= 0.02);
+    h += `<div class="row" style="margin:8px 0 4px">${btn(errs.length ? `Review: your ${plural(errs.length, 'error')} or every move` : 'Review every move', "openReview('current')", 'primary')}</div>`;
     if (errs.length) {
       h += `<table class="mini errs"><tr><th>Turn</th><th>You</th><th>Best</th><th>Cost</th></tr>`;
-      for (const d of errs) h += `<tr onclick="viewDecision(${gm.decisions.indexOf(d)})"><td>${d.turn}</td><td>${esc(decPlayed(d))}</td><td>${esc(d.res.best)}</td><td class="bad">${d.res.cost.toFixed(3)}</td></tr>`;
-      h += `</table><div class="muted small">Tap a row to see the position. Costs at 3-ply${gm.decisions.some((d) => d.res && d.res.src && d.res.src.startsWith('XG')) ? '; turns 1–2 from the XG opening book' : ''}.</div>`;
+      for (const d of errs) h += `<tr onclick="openReview('current', '${decKey(1, d.turn, d.k)}')"><td>${d.turn}</td><td>${esc(decPlayed(d))}</td><td>${esc(d.res.best)}</td><td class="bad">${d.res.cost.toFixed(3)}</td></tr>`;
+      h += `</table><div class="muted small">Tap a row to open it in the review. Costs at ${ER_PLY}-ply${gm.decisions.some((d) => d.res && d.res.src && d.res.src.startsWith('XG')) ? '; turns 1–2 from the XG opening book' : ''}.</div>`;
     } else h += `<div class="small good">No errors of 0.020 or more.</div>`;
     h += '</div>';
   }
@@ -994,9 +1032,136 @@ function viewDecision(i) {
 function closeView() { S.ui.view = null; renderAll(); }
 async function copyText(t) { try { await navigator.clipboard.writeText(t); toast('Copied'); } catch (e) { toast('Copy blocked: select the text and copy it'); } }
 
+// ------------------------------------------------------------- the review: your errors, or every move, in the analyzer's display
+// The review is the BG Position Analyzer's page (review.html + review.js, built from the analyzer by mkreview.py) in a
+// frame over the game: each position as the analyzer shows it, 2-, 3-, then 4-ply, Roll out, and in the tile Explain
+// and Go deeper. It gets the positions, the engine's weights, the opening book and (tile) Claude through
+// window.BGP_RV. The game's own workers stop while it is open; the review runs its own.
+const ERR_MIN = 0.020;
+// Your decisions' results in a small form kept with a game: {g: game, t: turn, k, c: cost, n: counted 1/0, b: best}.
+const compactDecs = (decs, g) => decs.filter((d) => d.res && !d.res.err).map((d) => ({ g, t: d.turn, k: d.k, c: +(+d.res.cost).toFixed(4), n: d.res.counted ? 1 : 0, b: String(d.res.best || '') }));
+const relCube = (c, side) => ({ value: c.value, owner: c.owner === 0 ? 0 : c.owner === side ? 1 : 2 });
+// The analyzer's game context, from `side`'s view.
+function ctxOf(G, side) {
+  const r = G.rules;
+  if (r.type === 'cash') return { type: 'money', jacoby: !!r.jacoby, beaver: !!r.beavers, len: 7, me: 0, opp: 0, crawford: false };
+  const mine = side === 'me' ? G.score.me : G.score.bot, theirs = side === 'me' ? G.score.bot : G.score.me;
+  return { type: 'match', jacoby: false, beaver: false, len: r.length, me: mine, opp: theirs, crawford: !!G.crawford };
+}
+// Your decisions in a replayed game, as analyzeDecision takes them (for games saved without their results).
+function decisionsOf(G) {
+  const out = [], base = { rules: G.rules, score: { me: G.score.me, bot: G.score.bot, crawford: G.crawford }, game: G.n };
+  for (const P of G.pos) {
+    const g = (side) => gOf(G.rules, G.score, G.crawford, P.cube, side);
+    if (P.type === 'roll' && P.side === 'me' && P.n > 1) out.push({ ...base, k: 'M', turn: P.turn, board: P.before, dice: P.dice, after: P.after, played: P.name, g: g('me'), cube: { ...P.cube } });
+    else if (P.type === 'nodouble') out.push({ ...base, k: 'R', turn: P.turn, board: P.board, g: g('me'), cube: { ...P.cube } });
+    else if (P.type === 'double' && P.side === 'me') out.push({ ...base, k: 'D', turn: P.turn, board: P.board, g: g('me'), cube: { ...P.cube } });
+    else if (P.type === 'double') out.push({ ...base, k: { take: 'T', drop: 'P', beaver: 'B' }[P.answer], turn: P.turn, board: P.board, g: g('bot'), cube: { ...P.cube } });
+  }
+  return out;
+}
+// The review's positions: every roll that had a move (both sides), every double with its answer, and your no-doubles
+// that were errors. costs: decKey -> {c, n, b} (your decisions).
+const decKey = (g, t, k) => `${g}:${t}:${k}`;
+function reviewItems(games, costs) {
+  const items = [], multi = games.length > 1, fmt = (c) => (c.c < 0.0005 ? ' · best' : ` · −${c.c.toFixed(3)}`);
+  for (const G of games) for (const P of G.pos) {
+    const pre = multi ? `Game ${G.n}, turn ${P.turn}` : `Turn ${P.turn}`;
+    if (P.type === 'roll') {
+      if (!P.n || !P.steps.length) continue;                  // no checker could move
+      const mine = P.side === 'me', c = mine ? costs[decKey(G.n, P.turn, 'M')] : null;
+      items.push({ id: decKey(G.n, P.turn, 'M'), who: P.side, board: P.before, dice: P.dice, cube: relCube(P.cube, P.side), game: ctxOf(G, P.side),
+        played: { after: P.after, name: P.name, by: P.side }, cost: c ? c.c : null, err: !!(c && c.n && c.c >= ERR_MIN),
+        label: `${pre} · ${mine ? 'You' : 'Open Sage'} rolled ${P.dice[0]}-${P.dice[1]}: ${P.name}${P.n === 1 ? ' (forced)' : c ? fmt(c) : ''}` });
+    } else if (P.type === 'nodouble') {
+      const c = costs[decKey(G.n, P.turn, 'R')]; if (!c || !c.n || c.c < ERR_MIN) continue;
+      items.push({ id: decKey(G.n, P.turn, 'R'), who: 'me', board: P.board, dice: null, cube: relCube(P.cube, 'me'), game: ctxOf(G, 'me'),
+        played: { action: 'No double', by: 'me' }, cost: c.c, err: true, label: `${pre} · You didn't ${P.cube.owner ? 'redouble' : 'double'}${fmt(c)}` });
+    } else if (P.type === 'double') {
+      const mineD = P.side === 'me', k = mineD ? 'D' : { take: 'T', drop: 'P', beaver: 'B' }[P.answer], c = costs[decKey(G.n, P.turn, k)];
+      items.push({ id: decKey(G.n, P.turn, k), who: P.side, board: P.board, dice: null, cube: relCube(P.cube, P.side), game: ctxOf(G, P.side),
+        played: { action: 'Double', by: P.side }, answer: { action: { take: 'Take', drop: 'Pass', beaver: 'Beaver' }[P.answer], by: other(P.side) },
+        cost: c ? c.c : null, err: !!(c && c.n && c.c >= ERR_MIN),
+        label: `${pre} · ${mineD ? 'You' : 'Open Sage'} ${P.cube.owner ? 'redoubled' : 'doubled'} to ${P.value}, ${mineD ? 'Open Sage' : 'you'} ${{ take: 'took', drop: 'passed', beaver: 'beavered' }[P.answer]}${c ? fmt(c) : ''}` });
+    }
+  }
+  return items;
+}
+const costMap = (list) => { const m = {}; for (const x of list) m[decKey(x.g, x.t, x.k)] = x; return m; };
+let RVJOB = null;
+// src: 'current' (the game just played) or a saved game's id; at: the item to open on.
+async function openReview(src, at) {
+  if ($('rvFrame') || RVJOB) return;
+  if (!ENG.weights || !ENG.pool) return toast('The engine is still loading');
+  let games, costs, title;
+  try {
+    if (src === 'current') {
+      const gm = S.game; if (!gm || gm.phase !== 'over') return;
+      if (gm.decisions.some((d) => !d.res)) { toast('Finishing your ER first…'); await Promise.all(gm.decisions.map((d) => analyzeDecision(d, 'hi'))); }
+      games = R.replayGames({ games: [{ n: 1, score: [gm.score.me, gm.score.bot], crawford: gm.crawford, events: gm.events }] }, gm.rules);
+      costs = costMap(compactDecs(gm.decisions, 1)); title = `Review: ${resultText(gm)}`;
+    } else {
+      const e = S.saved.find((x) => x.id === src); if (!e) return;
+      const chk = R.checkBgPlayMat(e.mat); games = chk.games; title = `Review: ${e.title}`;
+      if (!(e.decs && e.decsPly === ER_PLY)) { const decs = await scoreSaved(e, games); if (!decs) return; e.decs = decs; e.decsPly = ER_PLY; save(); }
+      costs = costMap(e.decs);
+    }
+  } catch (err) { RVJOB = null; renderMenu(); toast(`This game can't be reviewed: ${err.message || err}`, 4000); return; }
+  const items = reviewItems(games, costs);
+  if (!items.length) return toast('Nothing to review in this game');
+  await showReview(items, title, at);
+}
+// Your decisions in a saved game, scored at 4-ply now (games saved before the review kept no results).
+async function scoreSaved(e, games) {
+  const decs = games.flatMap((G) => decisionsOf(G).map((d) => ({ d, g: G.n })));
+  RVJOB = { done: 0, n: decs.length, cancel: false, title: e.title }; openMenu('scoring');
+  const out = [];
+  await Promise.all(decs.map(({ d, g }) => analyzeDecision(d, 'hi').then((res) => {
+    if (RVJOB && !RVJOB.cancel) { RVJOB.done++; if (S.ui.menu === 'scoring') renderMenu(); }
+    if (res && !res.err) out.push({ g, t: d.turn, k: d.k, c: +(+res.cost).toFixed(4), n: res.counted ? 1 : 0, b: String(res.best || '') });
+  })));
+  const ok = RVJOB && !RVJOB.cancel && out.length === decs.length; RVJOB = null;
+  if (S.ui.menu === 'scoring') closeMenu();
+  return ok ? out : null;
+}
+function cancelScoring() { closeMenu(); }
+let RVW = [];   // the review's engine workers (made here, see showReview)
+async function showReview(items, title, at) {
+  // The review's script goes into the frame inline, and its engine workers are made by this page (BGP_RV.worker): a frame
+  // written with document.write isn't served by the offline app's service worker, so anything it fetched itself (its
+  // script, a worker, the engine a worker loads) would fail offline. Fetched from here, they come from the device.
+  let html;
+  try {
+    const [h, j] = await Promise.all(['review.html', 'review.js'].map(async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(`${u}: HTTP ${r.status}`); return r.text(); }));
+    const tag = '<script src="review.js"></script>';
+    if (!h.includes(tag)) throw new Error('review.html has no script tag');
+    html = h.replace(tag, () => '<script>' + j.replace(/<\/(script)/gi, '<\\/$1') + '</script>');
+  } catch (err) { toast('The review page didn\'t load: ' + (err.message || err), 4000); return; }
+  closeMenu(); driveToken++; poolGen++;
+  const pool = ENG.pool; ENG.pool = null; ENG.state = 'review'; if (pool) pool.terminate();
+  window.BGP_RV = { items, title, at: at || null, target: TARGET, explain: TARGET === 'tile', claude: TARGET === 'tile' && window.claude ? window.claude : null,
+    weights: ENG.weights, manifest: ENG.manifest, book: BOOK, workers: S.set.workers, opts: { swapColour: !!S.set.swapColour, mirror: !!S.set.mirror },
+    botName: 'Open Sage', close: closeReview, worker: () => { const w = new Worker('pa-worker.js'); RVW.push(w); return w; } };
+  const f = document.createElement('iframe'); f.id = 'rvFrame'; f.title = title; f.setAttribute('allow', 'clipboard-write');
+  document.body.appendChild(f);
+  const d = f.contentDocument; d.open(); d.write(html); d.close();
+  const th = document.documentElement.getAttribute('data-theme'); if (th) d.documentElement.setAttribute('data-theme', th);
+}
+function closeReview() {
+  const f = $('rvFrame'); if (f) f.remove();
+  for (const w of RVW) { try { w.terminate(); } catch (e) {} }
+  RVW = [];
+  window.BGP_RV = null;
+  restartPool();
+}
+function restartPool() { if (ENG.weights) startPool().catch((err) => { ENG.state = 'error'; ENG.msg = 'The engine failed to restart: ' + (err.message || err); renderSide(); }); }
+
 // ------------------------------------------------------------- the menu
 function openMenu(sec) { S.ui.menu = sec || 'main'; renderMenu(); $('ovMenu').classList.add('open'); }
-function closeMenu() { S.ui.menu = null; $('ovMenu').classList.remove('open'); clearHash(); }
+function closeMenu() {
+  if (S.ui.menu === 'scoring' && RVJOB && !RVJOB.cancel) { RVJOB.cancel = true; driveToken++; restartPool(); }   // closing stops the scoring
+  S.ui.menu = null; $('ovMenu').classList.remove('open'); clearHash();
+}
 function setOpt(k, v) { S.set[k] = v; save(); renderMenu(); renderAll(); if (k === 'swapColour') document.body.classList.toggle('swapc', !!v); }
 function seg(k, opts) { return `<div class="seg">${opts.map(([v, l]) => `<button class="${S.set[k] === v ? 'on' : ''}" onclick='setOpt(${JSON.stringify(k)}, ${JSON.stringify(v)})'>${l}</button>`).join('')}</div>`; }
 function tog(k, label) { return `<label class="tog"><input type="checkbox" ${S.set[k] ? 'checked' : ''} onchange='setOpt(${JSON.stringify(k)}, this.checked)'> ${label}</label>`; }
@@ -1005,6 +1170,11 @@ function renderMenu() {
   if (sec === 'paste' || !sec) return;
   let h = `<div class="mhead"><h3>${sec === 'saved' ? 'Saved games' : sec === 'match' ? 'New match' : 'Menu'}</h3>${btn('✕', 'closeMenu()', 'icon')}</div>`;
   if (sec === 'saved') { $('menu').innerHTML = h + savedSection(); return; }
+  if (sec === 'scoring') {
+    const J = RVJOB, f = J && J.n ? Math.round((100 * J.done) / J.n) : 0;
+    $('menu').innerHTML = `<div class="mhead"><h3>Getting the review ready</h3>${btn('✕', 'closeMenu()', 'icon')}</div><p class="small">${J ? `${esc(J.title)}: scoring your moves at ${ER_PLY}-ply on this device, ${J.done} of ${J.n}. Games saved before the review kept no move-by-move results; this happens once.` : ''}</p><div style="height:8px;border-radius:4px;background:var(--line);overflow:hidden"><div style="height:100%;width:${f}%;background:var(--accent)"></div></div><div class="row" style="margin-top:10px">${btn('Cancel', 'cancelScoring()')}</div>`;
+    return;
+  }
   if (sec === 'match') {
     h += `<div class="field">Match length <span class="stepper">${btn('−', `setOpt('length', Math.max(1, S.set.length - 2))`)}<b>${S.set.length}</b>${btn('+', `setOpt('length', Math.min(25, S.set.length + 2))`)}</span></div>`;
     h += `<h4>Open Sage plays at</h4>${seg('ply', [[1, '1-ply'], [2, '2-ply'], [3, '3-ply'], [4, '4-ply']])}`;
@@ -1019,7 +1189,7 @@ function renderMenu() {
   h += `<div class="row">${S.set.type === 'cash' ? btn(S.sess ? 'New game' : 'Start', 'closeMenu(); startCash(false)', '', ENG.state !== 'ready') + btn('New session', 'closeMenu(); startCash(true)', '', ENG.state !== 'ready') : btn('New match', 'closeMenu(); startMatch()', '', ENG.state !== 'ready')}</div>`;
   if (inGame) h += `<p class="muted small">Starting a new game abandons the one in progress; it isn't scored.</p>`;
   h += `<h4>Open Sage plays at</h4>${seg('ply', [[1, '1-ply'], [2, '2-ply'], [3, '3-ply'], [4, '4-ply']])}`;
-  h += `<p class="muted small">From the next ${S.set.type === 'match' ? 'match' : 'game'}. Your ER is always 3-ply.</p>${tog('showBot', 'Show the plays Open Sage compared')}`;
+  h += `<p class="muted small">From the next ${S.set.type === 'match' ? 'match' : 'game'}. Your ER is always ${ER_PLY}-ply.</p>${tog('showBot', 'Show the plays Open Sage compared')}`;
   if (inGame && gm.onRoll === 'me' && (gm.phase === 'preroll' || gm.phase === 'move')) {
     const jac = gm.rules.type === 'cash' && gm.rules.jacoby && gm.cube.owner === 0 && gm.cube.value === 1;
     h += `<h4>Resign</h4><div class="row">${btn(`Single (${R.pointsFor(1, gm.cube, gm.rules)})`, 'userResign(1)')}${jac ? '' : btn(`Gammon (${R.pointsFor(2, gm.cube, gm.rules)})`, 'userResign(2)') + btn(`Backgammon (${R.pointsFor(3, gm.cube, gm.rules)})`, 'userResign(3)')}</div>`;
@@ -1030,7 +1200,7 @@ function renderMenu() {
   h += `<h4>Saved games</h4>${btn(`Saved games (${S.saved.length})`, 'openMenu(\'saved\')')}`;
   h += `<h4>Engine</h4><div class="field">Workers ${['1', '2', '4', '6'].map((n) => btn(n, `setWorkers(${n})`, S.set.workers === +n ? 'on' : '')).join('')}</div>`;
   if (TARGET === 'tile') h += `<div class="row">${btn('Copy the opening book for the offline app', 'copyBook()')}</div>`;
-  else h += `<div class="small">${BOOK ? 'Opening book loaded (XG book for your turns 1–2).' : 'No opening book: your turns 1–2 are scored at 3-ply.'}</div><div class="row">${btn(BOOK ? 'Replace the opening book' : 'Paste the opening book', 'openPaste(\'book\')')}</div>${installBtn()}`;
+  else h += `<div class="small">${BOOK ? 'Opening book loaded (XG book for your turns 1–2).' : `No opening book: your turns 1–2 are scored at ${ER_PLY}-ply.`}</div><div class="row">${btn(BOOK ? 'Replace the opening book' : 'Paste the opening book', 'openPaste(\'book\')')}</div>${installBtn()}`;
   h += `<p class="muted small">BG Play ${esc(VERSION)} · Open Sage (MPL-2.0, github.com/markbgsage/bgsage) · all analysis runs on this device.</p>`;
   h += '</section></div>';
   $('menu').innerHTML = h;
@@ -1048,16 +1218,23 @@ function buildMat(kind) {
     const M = S.match;
     return { id: M.id, kind, ply: M.ply, length: M.length, title: gameTitle('match', M, M.started),
       mat: R.matText({ id: 'bgp-' + M.id, p1: USER, p2: botName(M.ply), length: M.length, ply: M.ply, date: new Date(M.started) }, M.games.map((g) => ({ score: [g.score.me, g.score.bot], events: g.events }))),
-      result: `${M.score.me}–${M.score.bot}`, er: matchER() };
+      result: `${M.score.me}–${M.score.bot}`, er: matchER(), decsPly: M.games.every((g) => g.decs) ? ER_PLY : 0,
+      decs: M.games.flatMap((g, i) => (g.decs || []).map((x) => ({ ...x, g: i + 1 }))) };
   }
   return { id: gm.id, kind: 'cash', ply: gm.ply, title: gameTitle('cash', gm, gm.started),
     mat: R.matText({ id: 'bgp-' + gm.id, p1: USER, p2: botName(gm.ply), length: 0, ply: gm.ply, jacoby: gm.rules.jacoby, beavers: gm.rules.beavers, date: new Date(gm.started) }, [{ score: [0, 0], events: gm.events }]),
-    result: resultText(gm), er: gm.er ? { er: gm.er.er, n: gm.er.n, total: gm.er.total } : null };
+    result: resultText(gm), er: gm.er ? { er: gm.er.er, n: gm.er.n, total: gm.er.total } : null, decs: compactDecs(gm.decisions, 1), decsPly: gm.er ? ER_PLY : 0 };
 }
 function matchER() {
   const gs = S.match.games.filter((g) => g.er); if (!gs.length) return null;
   const n = gs.reduce((a, g) => a + g.er.n, 0), total = gs.reduce((a, g) => a + g.er.total, 0);
   return { er: n ? total * 500 / n : 0, n, total };
+}
+// The result of a checked game file, in the saved list's words.
+function matResult(chk) {
+  if (chk.kind === 'cash') { const r = chk.games[0].result; return `${r.winner === 'me' ? 'You win' : 'Open Sage wins'} ${plural(r.points, 'point')}`; }
+  const last = chk.games[chk.games.length - 1], sc = { ...last.score }; sc[last.result.winner] += last.result.points;
+  return `${sc.me}–${sc.bot}`;
 }
 function savedLabel(x) { return { local: TARGET === 'pwa' ? 'Saved on this device: not sent yet' : 'Saved on this device', queued: 'Queued: sends when online', sending: 'Sending…', sent: 'Sent for analysis', copied: 'Copied for the tile', reviewing: 'Being analysed', done: 'Review ready', error: 'Not sent: tap to retry' }[x.status] || x.status; }
 async function saveForAnalysis() {
@@ -1124,7 +1301,7 @@ function savedSection() {
     h += `<div class="sv"><div><b>${esc(e.title)}</b> · ${esc(e.result || '')}${e.er ? ` · ER ${(+e.er.er).toFixed(2)}` : ''}</div><div class="small ${e.status === 'error' ? 'bad' : 'muted'}">${esc(savedLabel(e))}${e.fireErr && e.status === 'sent' ? ' · ' + esc(e.fireErr) : ''}${e.err && e.status === 'error' ? ' · ' + esc(e.err) : ''}</div><div class="row">`;
     if (e.review) h += `<a class="btnlink primary" href="${esc(e.review)}" target="_blank" rel="noopener">Open the review</a>`;
     if (TARGET === 'tile' && e.status === 'sent' && e.fireErr) h += btn('Start the review', `retryFire(${esc(JSON.stringify(e.id))})`);
-    h += btn('Download .mat', `downloadMat(${esc(JSON.stringify(e.id))})`) + btn('Remove', `removeSaved(${esc(JSON.stringify(e.id))})`) + '</div></div>';
+    h += btn('Review', `openReview(${esc(JSON.stringify(e.id))})`) + btn('Download .mat', `downloadMat(${esc(JSON.stringify(e.id))})`) + btn('Remove', `removeSaved(${esc(JSON.stringify(e.id))})`) + '</div></div>';
   }
   return h + '</div>';
 }
@@ -1223,17 +1400,26 @@ async function importText(raw) {
     if (!mg) throw new Error('That isn\'t text copied from BG Play.');
     if (TARGET !== 'tile') throw new Error('Paste these games into the BG Play tile in Claude: it starts the reviews.');
     if (sum(mg[3]) !== +mg[2]) throw new Error('That isn\'t the whole text: copy it again in the offline app.');
-    const list = await unpackJson(mg[3]); const added = [];
-    for (const x of list) {
-      if (typeof x.mat !== 'string' || !/^; \[Site /.test(x.mat) || typeof x.id !== 'string' || !/^[A-Za-z0-9_-]{4,40}$/.test(x.id)) continue;
+    const list = await unpackJson(mg[3]); const added = []; let refused = 0;
+    if (!Array.isArray(list)) throw new Error('That isn\'t a list of games.');
+    // Only BG Play's own game files get in, checked line by line and replayed move by move (rules.js
+    // checkBgPlayMat): its headers and player names, its move lines, legal moves and cube actions, a result that fits.
+    // The title and result shown are rebuilt from the game itself; nothing else pasted is kept. These files go on to
+    // Claude for review, so nothing else may ride along with them (the user's request, 2026-11-25).
+    for (const x of list.slice(0, 200)) {
+      if (!x || typeof x.mat !== 'string' || typeof x.id !== 'string' || !/^[A-Za-z0-9_-]{4,40}$/.test(x.id)) { refused++; continue; }
+      let chk; try { chk = R.checkBgPlayMat(x.mat); } catch (err) { refused++; continue; }
+      if (chk.id !== x.id) { refused++; continue; }
       if (S.saved.find((e) => e.id === x.id)) continue;
-      const e = { id: x.id, kind: x.kind === 'match' ? 'match' : 'cash', title: String(x.title || 'Game vs Open Sage').slice(0, 80), mat: x.mat, ply: +x.ply || 3, result: String(x.result || '').slice(0, 80),
-        er: x.er && isFinite(x.er.er) ? { er: +x.er.er, n: +x.er.n, total: +x.er.total } : null, created: +x.created || Date.now(), status: 'local', source: 'pwa' };
+      const created = Number.isFinite(+x.created) ? Math.min(Math.max(+x.created, 1.5e12), Date.now() + 864e5) : Date.now();
+      const er = x.er && [x.er.er, x.er.n, x.er.total].every((v) => Number.isFinite(+v)) ? { er: +x.er.er, n: +x.er.n, total: +x.er.total } : null;
+      const e = { id: x.id, kind: chk.kind, title: gameTitle(chk.kind, { length: chk.rules.length }, created), mat: x.mat, ply: chk.ply, result: matResult(chk), er, created, status: 'local', source: 'pwa' };
       S.saved.unshift(e); added.push(e);
     }
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();   // close the keyboard
     save(); clearHash(); openMenu('saved');
-    toast(added.length ? `Added ${plural(added.length, 'game')} from the offline app: sending for review` : 'Those games are already here', 4000);
+    const left = refused ? ` ${plural(refused, 'pasted game')} ${refused === 1 ? 'wasn\'t a BG Play game file and was' : 'weren\'t BG Play game files and were'} left out.` : '';
+    toast((added.length ? `Added ${plural(added.length, 'game')} from the offline app: sending for review.` : refused ? 'No games added.' : 'Those games are already here.') + left, 5000);
     for (const e of added) await sendOne(e);
   } catch (e) { pasteMsg(e.message || String(e)); }
 }
@@ -1267,8 +1453,8 @@ function setupPwa() {
 function boot() {
   load();
   document.body.classList.toggle('swapc', !!S.set.swapColour);
-  if (S.game && S.game.phase !== 'over') {      // resume: rebuild the decisions' analyses
-    for (const d of S.game.decisions) if (!d.res) analyzeDecision(d, 'lo');
+  if (S.game && S.game.phase !== 'over') {      // resume: results from before the 4-ply ER are redone when the engine starts
+    for (const d of S.game.decisions) if (d.res && d.res.ply !== ER_PLY) delete d.res;
   }
   const svg = $('board');
   svg.addEventListener('pointerdown', onDown); svg.addEventListener('pointermove', onMove); svg.addEventListener('pointerup', onUp);
