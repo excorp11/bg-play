@@ -584,11 +584,13 @@ function chk(cx, cy, mine, label, extra = '') {
   if (label) t += `<text x="${cx}" y="${cy + G.r * 0.36}" font-size="${G.r * 1.05}" font-weight="700" text-anchor="middle" fill="${mine ? 'var(--me-ink)' : 'var(--opp-ink)'}">${label}</text>`;
   return t;
 }
-function dieSvg(x, y, s, v, dim, cls) {
+// A die in the colours of the side that rolled it (who: 'me' | 'bot').
+function dieSvg(x, y, s, v, dim, who) {
   const P = { 1: [[.5, .5]], 2: [[.27, .27], [.73, .73]], 3: [[.27, .27], [.5, .5], [.73, .73]], 4: [[.27, .27], [.73, .27], [.27, .73], [.73, .73]],
     5: [[.27, .27], [.73, .27], [.5, .5], [.27, .73], [.73, .73]], 6: [[.27, .25], [.73, .25], [.27, .5], [.73, .5], [.27, .75], [.73, .75]] }[v];
-  return `<g opacity="${dim ? 0.38 : 1}" class="${cls || ''}"><rect x="${x}" y="${y}" width="${s}" height="${s}" rx="${s * 0.18}" fill="${cls === 'bdie' ? '#f4efe2' : '#fff'}" stroke="#333" stroke-width="1.2"/>` +
-    P.map(([a, c]) => `<circle cx="${x + a * s}" cy="${y + c * s}" r="${s * 0.085}" fill="#222"/>`).join('') + '</g>';
+  const me = who !== 'bot', fill = me ? 'var(--me)' : 'var(--opp)', edge = me ? 'var(--me-edge)' : 'var(--opp-edge)', pip = me ? 'var(--me-ink)' : 'var(--opp-ink)';
+  return `<g opacity="${dim ? 0.38 : 1}"><rect x="${x}" y="${y}" width="${s}" height="${s}" rx="${s * 0.18}" fill="${fill}" stroke="${edge}" stroke-width="1.4"/>` +
+    P.map(([a, c]) => `<circle cx="${x + a * s}" cy="${y + c * s}" r="${s * 0.085}" fill="${pip}"/>`).join('') + '</g>';
 }
 // The board to draw: the game's, or a preview (a reviewed decision), with the dragged checker lifted.
 function viewBoard() {
@@ -660,24 +662,26 @@ function drawBoard() {
   G.diceBox = null;
   const ds = Math.min(G.zh * 0.95, G.pw * 0.82, 40);
   if (gm && !v) {
+    // both home boards are on one half (the right, or the left with "Home board on the left"): every roll lands there
+    const homeX = S.set.mirror ? G.colX(3) : G.colX(9);
     if (gm.phase === 'opening' && gm.opening) {
-      const ry = mid - ds / 2;
-      s += dieSvg(G.colX(2) + G.pw / 2 - ds / 2, ry, ds, gm.opening.bot, false, 'bdie') + dieSvg(G.colX(9) + G.pw / 2 - ds / 2, ry, ds, gm.opening.me, false);
+      const ry = mid - ds / 2, gap = ds * 0.6;
+      s += dieSvg(homeX - ds - gap / 2, ry, ds, gm.opening.bot, false, 'bot') + dieSvg(homeX + gap / 2, ry, ds, gm.opening.me, false, 'me');
     } else if (gm.dice && gm.phase === 'move') {
-      const mine = gm.onRoll === 'me', t = mine ? getTurn() : null, order = t ? t.order : gm.dice;
-      const gap = ds * 0.25, cx = mine ? G.colX(9) : G.colX(3), y = mid - ds / 2, x1 = cx - ds - gap / 2, x2 = cx + gap / 2;
+      const mine = gm.onRoll === 'me', who = mine ? 'me' : 'bot', t = mine ? getTurn() : null, order = t ? t.order : gm.dice;
+      const gap = ds * 0.25, cx = homeX, y = mid - ds / 2, x1 = cx - ds - gap / 2, x2 = cx + gap / 2;
       if (t && doubles(order)) {
         const left = t.remaining().length;
-        s += dieSvg(x1, y, ds, order[0], left === 0) + dieSvg(x2, y, ds, order[1], left === 0);
-        s += `<text x="${cx}" y="${y + ds + 13}" font-size="11" font-weight="700" text-anchor="middle" fill="#efe6d2">${left ? `${left} to play` : 'done'}</text>`;
+        s += dieSvg(x1, y, ds, order[0], left === 0, who) + dieSvg(x2, y, ds, order[1], left === 0, who);
+        s += `<text x="${cx}" y="${y + ds + 13}" font-size="11" font-weight="700" text-anchor="middle" fill="var(--ink)" opacity=".75">${left ? `${left} to play` : 'done'}</text>`;
       } else {
         const rem = t ? t.remaining() : order;
-        s += dieSvg(x1, y, ds, order[0], !!t && !rem.includes(order[0]), mine ? '' : 'bdie') + dieSvg(x2, y, ds, order[1], !!t && !rem.includes(order[1]), mine ? '' : 'bdie');
+        s += dieSvg(x1, y, ds, order[0], !!t && !rem.includes(order[0]), who) + dieSvg(x2, y, ds, order[1], !!t && !rem.includes(order[1]), who);
       }
       if (mine) G.diceBox = [x1 - 6, y - 6, x2 + ds + 6, y + ds + 18];
     }
     if (gm.phase === 'offer' && gm.offer) {
-      const mine = gm.offer.by === 'me', x = mine ? G.colX(9) : G.colX(3), size = Math.min(ds * 1.15, 44);
+      const x = S.set.mirror ? G.colX(3) : G.colX(9), size = Math.min(ds * 1.15, 44);
       s += cubeAt(mid - size / 2, gm.offer.value, x, size, true);
     }
   }
@@ -856,8 +860,10 @@ function scoreLine() {
   return S.set.type === 'match' ? `Match to ${S.set.length}` : `Cash game · ${S.set.jacoby ? 'Jacoby' : 'no Jacoby'}${S.set.beavers ? ', beavers' : ''}`;
 }
 function btn(label, fn, cls = '', dis = false, title = '') { return `<button class="${cls}" onclick="${fn}" ${dis ? 'disabled' : ''} ${title ? `title="${esc(title)}"` : ''}>${label}</button>`; }
+let sideLater = false;
 function renderSide() {
   const el = $('side'); if (!el) return;
+  const z = $('pasteZone'); if (z && document.activeElement === z) { sideLater = true; return; }   // don't pull the box from under the finger
   const gm = S.game, v = S.ui.view;
   let h = `<div class="bar-top"><div class="title">BG Play <span class="muted">vs Open Sage ${gm ? gm.ply : S.set.ply}-ply</span></div>${btn('⋯', 'openMenu()', 'icon', false, 'Menu')}</div>`;
   h += `<div class="score">${esc(scoreLine())}</div>`;
@@ -867,7 +873,7 @@ function renderSide() {
   if (v && v.panel) { el.innerHTML = h + v.panel; return; }
   if (!gm) {
     h += `<div class="card"><p>Play Open Sage on this device: no connection needed.</p>
-      <div class="row">${btn('New cash game', 'startCash(true)', 'primary', ENG.state !== 'ready')}${btn('New match', 'openMenu(\'match\')', '', ENG.state !== 'ready')}</div></div>`;
+      <div class="row">${btn('New cash game', 'startCash(true)', 'primary', ENG.state !== 'ready')}${btn('New match', 'openMenu(\'match\')', '', ENG.state !== 'ready')}</div></div>${pasteZone()}`;
   } else h += gamePanel(gm);
   el.innerHTML = h;
 }
@@ -949,11 +955,12 @@ function overPanel(gm) {
   const canSave = !isMatch || M.over;
   const savedAlready = S.saved.find((x) => x.id === (isMatch ? M.id : gm.id));
   h += '<div class="row big">';
-  if (canSave) h += savedAlready ? btn(savedLabel(savedAlready), 'openMenu(\'saved\')') : btn('Save for full analysis', 'saveForAnalysis()', '', !gm.er);
+  if (canSave && savedAlready && TARGET === 'pwa' && (savedAlready.status === 'local' || savedAlready.status === 'copied')) h += sendLink(savedAlready.status === 'copied' ? 'Send to the tile again' : 'Send to the tile for review');
+  else if (canSave) h += savedAlready ? btn(savedLabel(savedAlready), 'openMenu(\'saved\')') : btn('Save for full analysis', 'saveForAnalysis()', '', !gm.er);
   h += btn(isMatch ? (M.over ? 'New match' : 'Next game') : 'Next game', 'nextGame()', 'primary') + '</div>';
   if (canSave) h += `<div class="row">${btn('Download .mat', 'downloadMat()')}${isMatch ? '' : ''}</div>`;
   else h += `<div class="muted small">When the match ends you can save it for full analysis.</div>`;
-  return h;
+  return h + pasteZone();
 }
 const decPlayed = (d) => (d.k === 'M' ? `${d.dice[0]}-${d.dice[1]} ${d.played}` : { R: 'No double', D: 'Double', T: 'Take', P: 'Pass', B: 'Beaver' }[d.k]);
 function viewDecision(i) {
@@ -989,12 +996,13 @@ async function copyText(t) { try { await navigator.clipboard.writeText(t); toast
 
 // ------------------------------------------------------------- the menu
 function openMenu(sec) { S.ui.menu = sec || 'main'; renderMenu(); $('ovMenu').classList.add('open'); }
-function closeMenu() { S.ui.menu = null; $('ovMenu').classList.remove('open'); }
+function closeMenu() { S.ui.menu = null; $('ovMenu').classList.remove('open'); clearHash(); }
 function setOpt(k, v) { S.set[k] = v; save(); renderMenu(); renderAll(); if (k === 'swapColour') document.body.classList.toggle('swapc', !!v); }
 function seg(k, opts) { return `<div class="seg">${opts.map(([v, l]) => `<button class="${S.set[k] === v ? 'on' : ''}" onclick='setOpt(${JSON.stringify(k)}, ${JSON.stringify(v)})'>${l}</button>`).join('')}</div>`; }
 function tog(k, label) { return `<label class="tog"><input type="checkbox" ${S.set[k] ? 'checked' : ''} onchange='setOpt(${JSON.stringify(k)}, this.checked)'> ${label}</label>`; }
 function renderMenu() {
   const gm = S.game, inGame = gm && gm.phase !== 'over', sec = S.ui.menu;
+  if (sec === 'paste' || !sec) return;
   let h = `<div class="mhead"><h3>${sec === 'saved' ? 'Saved games' : sec === 'match' ? 'New match' : 'Menu'}</h3>${btn('✕', 'closeMenu()', 'icon')}</div>`;
   if (sec === 'saved') { $('menu').innerHTML = h + savedSection(); return; }
   if (sec === 'match') {
@@ -1051,7 +1059,7 @@ function matchER() {
   const n = gs.reduce((a, g) => a + g.er.n, 0), total = gs.reduce((a, g) => a + g.er.total, 0);
   return { er: n ? total * 500 / n : 0, n, total };
 }
-function savedLabel(x) { return { local: 'Saved on this device', queued: 'Queued: sends when online', sending: 'Sending…', sent: 'Sent for analysis', copied: 'Copied for the tile', reviewing: 'Being analysed', done: 'Review ready', error: 'Not sent: tap to retry' }[x.status] || x.status; }
+function savedLabel(x) { return { local: TARGET === 'pwa' ? 'Saved on this device: not sent yet' : 'Saved on this device', queued: 'Queued: sends when online', sending: 'Sending…', sent: 'Sent for analysis', copied: 'Copied for the tile', reviewing: 'Being analysed', done: 'Review ready', error: 'Not sent: tap to retry' }[x.status] || x.status; }
 async function saveForAnalysis() {
   const gm = S.game; if (!gm || gm.phase !== 'over') return;
   const kind = gm.rules.type === 'match' ? 'match' : 'cash';
@@ -1059,7 +1067,7 @@ async function saveForAnalysis() {
   if (S.saved.find((x) => x.id === e.id)) return openMenu('saved');
   S.saved.unshift(e); save(); renderAll();
   if (TARGET === 'tile') await sendOne(e);
-  else { e.status = 'local'; save(); openMenu('saved'); toast('Saved. Send it to the tile for the review when you\'re online.'); }
+  else { e.status = 'local'; save(); prepareBundle(); toast('Saved on this device. Tap Send to the tile when you\'re online.', 3500); }
 }
 // Tile: write the game to the page's database, then start the scheduled analysis. Offline or no database: queue it.
 let CAP = { db: null, mcp: null, dl: null };
@@ -1107,9 +1115,9 @@ function watchReviews() {
 function savedSection() {
   let h = '';
   if (TARGET === 'pwa') {
-    const unsent = S.saved.filter((x) => x.status === 'local' || x.status === 'copied');
-    h += `<div class="card"><p class="small">Reviews run in your Claude project. Copy the games, open the tile (online) and paste them there.</p><div class="row">${btn(`Copy ${plural(unsent.length, 'game')} for the tile`, 'copyForTile()', 'primary', !unsent.length)}${TILE_URL ? `<a class="btnlink" href="${esc(TILE_URL)}" target="_blank" rel="noopener">Open the tile</a>` : ''}</div></div>`;
-  } else h += `<div class="row">${btn('Paste games from the offline app', 'openPaste(\'games\')')}${btn('Retry sending', 'flushQueue()', '', !S.saved.some((x) => x.status === 'queued' || x.status === 'error'))}</div>`;
+    const n = unsent().length; if (n && !BUNDLE) prepareBundle();
+    h += `<div class="card"><p class="small">Reviews run in your Claude project. Send to the tile copies the games and opens the BG Play tile (you need a connection): tap its box and Paste.</p>${n ? `<div class="row">${sendLink(`Send ${plural(n, 'game')} to the tile`, 'primary')}</div>` : ''}</div>`;
+  } else h += `<div class="row">${btn('Paste games from the offline app', 'openPaste(\'games\')', 'primary')}${btn('Retry sending', 'flushQueue()', '', !S.saved.some((x) => x.status === 'queued' || x.status === 'error'))}</div>`;
   if (!S.saved.length) return h + '<p class="muted">No saved games yet. Finish a game and tap Save for full analysis.</p>';
   h += '<div class="saved">';
   for (const e of S.saved) {
@@ -1147,45 +1155,96 @@ async function unpackJson(s) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 const sum = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 1000003; return h; };
-async function copyForTile() {
-  const list = S.saved.filter((x) => x.status === 'local' || x.status === 'copied').map(({ id, kind, title, mat, ply, result, er, created }) => ({ id, kind, title, mat, ply, result, er, created, source: 'pwa' }));
-  if (!list.length) return;
-  const body = await packJson(list), text = `BGPLAY-GAMES ${list.length} ${sum(body)} ${body}`;
-  try { await navigator.clipboard.writeText(text); list.forEach((x) => { const e = S.saved.find((s) => s.id === x.id); e.status = 'copied'; e.copied = Date.now(); }); save(); renderMenu(); toast(`Copied ${plural(list.length, 'game')}. Open the tile and paste ${list.length === 1 ? 'it' : 'them'} in Saved games.`, 4000); }
-  catch (e) { showPasteOut(text); }
+// The games waiting to go to the tile (offline app), packed ahead of the tap so that the copy and the opening of the
+// tile both happen inside the tap (browsers allow both only during a user gesture).
+let BUNDLE = null;
+const unsent = () => S.saved.filter((x) => x.status === 'local' || x.status === 'copied');
+async function prepareBundle() {
+  if (TARGET !== 'pwa') return null;
+  const list = unsent().map(({ id, kind, title, mat, ply, result, er, created }) => ({ id, kind, title, mat, ply, result, er, created, source: 'pwa' }));
+  const key = list.map((x) => x.id).join(',');
+  if (!list.length) { BUNDLE = null; return null; }
+  if (BUNDLE && BUNDLE.key === key) return BUNDLE;
+  const body = await packJson(list);
+  BUNDLE = { key, ids: list.map((x) => x.id), text: `BGPLAY-GAMES ${list.length} ${sum(body)} ${body}` };
+  renderAll(); if (S.ui.menu === 'saved') renderMenu();
+  return BUNDLE;
+}
+// Offline app: a link that opens the tile on its paste screen (#paste); the tap also copies the games.
+// With no connection the tap only copies.
+function sendLink(label, cls = '') {
+  const go = navigator.onLine && TILE_URL;
+  return `<a class="btnlink ${cls}" href="${esc(go ? TILE_URL + '#paste' : '#')}" target="_blank" rel="noopener" onclick="return sendToTile()">${go ? label : `Copy ${plural(unsent().length, 'game')} for the tile`}</a>`;
+}
+function sendToTile() {
+  const B = BUNDLE; if (!B) { prepareBundle(); toast('Getting the games ready: tap again'); return false; }
+  const go = !!(navigator.onLine && TILE_URL);
+  let p; try { p = navigator.clipboard.writeText(B.text); } catch (e) { p = Promise.reject(e); }
+  p.then(() => {
+    B.ids.forEach((id) => { const e = S.saved.find((x) => x.id === id); if (e) { e.status = 'copied'; e.copied = Date.now(); } }); save(); renderAll(); if (S.ui.menu === 'saved') renderMenu();
+    toast(go ? `Copied ${plural(B.ids.length, 'game')}. In the tile: tap the box and Paste.` : `Copied ${plural(B.ids.length, 'game')}. When you're online, open the BG Play tile in Claude and paste.`, 5000);
+  }).catch(() => showPasteOut(B.text));
+  return go;
 }
 async function copyBook() {
   if (!BOOK) return toast('The opening book isn\'t loaded yet');
   const body = await packJson(BOOK), text = `BGPLAY-BOOK ${sum(body)} ${body}`;
   try { await navigator.clipboard.writeText(text); toast('Copied. In the offline app: Menu → Paste the opening book.', 4000); } catch (e) { showPasteOut(text); }
 }
-function showPasteOut(text) { $('menu').innerHTML = `<div class="mhead"><h3>Copy this text</h3>${btn('✕', 'closeMenu()', 'icon')}</div><p class="small">The clipboard is blocked here: select all of it and copy.</p><textarea class="paste" readonly>${esc(text)}</textarea>`; }
+function showPasteOut(text) { S.ui.menu = 'paste'; $('ovMenu').classList.add('open'); $('menu').innerHTML = `<div class="mhead"><h3>Copy this text</h3>${btn('✕', 'closeMenu()', 'icon')}</div><p class="small">The clipboard is blocked here: select all of it and copy.</p><textarea class="paste" readonly>${esc(text)}</textarea>`; }
+// The paste screen: the text is taken as soon as it lands (a paste, or the keyboard's clipboard suggestion).
 function openPaste(what) {
   S.ui.menu = 'paste'; $('ovMenu').classList.add('open');
-  $('menu').innerHTML = `<div class="mhead"><h3>${what === 'book' ? 'Paste the opening book' : 'Paste games from the offline app'}</h3>${btn('✕', 'closeMenu()', 'icon')}</div>
-    <p class="small">${what === 'book' ? 'In the tile: Menu → Copy the opening book for the offline app. Then long-press here and Paste.' : 'In the offline app: Saved games → Copy for the tile. Then long-press here and Paste.'}</p>
-    <textarea id="pasteBox" class="paste" placeholder="Paste here"></textarea><div class="row">${btn('Cancel', 'closeMenu()')}${btn('Add', `takePaste('${what}')`, 'primary')}</div><div id="pasteMsg" class="small bad"></div>`;
+  const book = what === 'book';
+  $('menu').innerHTML = `<div class="mhead"><h3>${book ? 'Paste the opening book' : 'Paste games from the offline app'}</h3>${btn('✕', 'closeMenu()', 'icon')}</div>
+    <p class="small">${book ? 'In the tile: Menu → Copy the opening book for the offline app. Then come back here.' : 'Tap the box, then Paste (the keyboard\'s clipboard suggestion works too). The games are added as soon as they land and go off for review. Nothing copied yet? In the offline app: Saved games → Send to the tile.'}</p>
+    <textarea id="pasteBox" class="paste" placeholder="Tap here, then Paste" oninput="pasteInput(this)"></textarea>
+    <div class="row">${TARGET === 'pwa' && navigator.clipboard && navigator.clipboard.readText ? btn('Paste from the clipboard', 'readClip()', 'primary') : ''}${btn('Cancel', 'closeMenu()')}</div><div id="pasteMsg" class="small bad"></div>`;
 }
-async function takePaste(what) {
-  const raw = ($('pasteBox').value || '').trim(), msg = $('pasteMsg');
+function pasteInput(el) {
+  const v = el.value;
+  if (/BGPLAY-(GAMES|BOOK) /.test(v)) { el.value = ''; importText(v); }
+  else if (v.length > 40) { el.value = ''; pasteMsg(notOurs()); }     // something else was pasted
+}
+const notOurs = () => TARGET === 'tile' ? 'That isn\'t a game from the offline app. In the app: Saved games → Send to the tile, then paste here.' : 'That isn\'t the opening book: in the tile, Menu → Copy the opening book for the offline app.';
+async function readClip() { try { importText(await navigator.clipboard.readText()); } catch (e) { pasteMsg('The browser didn\'t allow reading the clipboard: tap the box and Paste instead.'); } }
+const pasteMsg = (t) => { const m = $('pasteMsg'); if (m && S.ui.menu === 'paste') m.textContent = t; else toast(t, 4000); };
+// Any text copied from BG Play, from wherever it was pasted: games (into the tile) or the opening book (into the app).
+async function importText(raw) {
+  raw = String(raw || '');
+  const mg = raw.match(/BGPLAY-GAMES (\d+) (\d+) ([A-Za-z0-9+/=]+)/), mb = raw.match(/BGPLAY-BOOK (\d+) ([A-Za-z0-9+/=]+)/);
   try {
-    if (what === 'book') {
-      const m = raw.match(/^BGPLAY-BOOK (\d+) (\S+)$/); if (!m || sum(m[2]) !== +m[1]) throw new Error('That isn\'t the whole book: copy it again from the tile.');
-      const b = await unpackJson(m[2]); if (!b.open || !b.reply) throw new Error('Not an opening book');
-      localStorage.setItem('bgplay-book', m[2]); BOOK = b; closeMenu(); toast('Opening book loaded'); return;
+    if (mb) {
+      if (TARGET === 'tile') throw new Error('That\'s the opening book: paste it into the offline app.');
+      if (sum(mb[2]) !== +mb[1]) throw new Error('That isn\'t the whole book: copy it again from the tile.');
+      const b = await unpackJson(mb[2]); if (!b.open || !b.reply) throw new Error('Not an opening book');
+      localStorage.setItem('bgplay-book', mb[2]); BOOK = b; closeMenu(); toast('Opening book loaded: your turns 1–2 are now scored from the XG book'); return;
     }
-    const m = raw.match(/^BGPLAY-GAMES (\d+) (\d+) (\S+)$/); if (!m || sum(m[3]) !== +m[2]) throw new Error('That isn\'t the whole text: copy it again in the offline app.');
-    const list = await unpackJson(m[3]); let added = 0;
+    if (!mg) throw new Error('That isn\'t text copied from BG Play.');
+    if (TARGET !== 'tile') throw new Error('Paste these games into the BG Play tile in Claude: it starts the reviews.');
+    if (sum(mg[3]) !== +mg[2]) throw new Error('That isn\'t the whole text: copy it again in the offline app.');
+    const list = await unpackJson(mg[3]); const added = [];
     for (const x of list) {
       if (typeof x.mat !== 'string' || !/^; \[Site /.test(x.mat) || typeof x.id !== 'string' || !/^[A-Za-z0-9_-]{4,40}$/.test(x.id)) continue;
-      if (S.saved.find((s) => s.id === x.id)) continue;
+      if (S.saved.find((e) => e.id === x.id)) continue;
       const e = { id: x.id, kind: x.kind === 'match' ? 'match' : 'cash', title: String(x.title || 'Game vs Open Sage').slice(0, 80), mat: x.mat, ply: +x.ply || 3, result: String(x.result || '').slice(0, 80),
         er: x.er && isFinite(x.er.er) ? { er: +x.er.er, n: +x.er.n, total: +x.er.total } : null, created: +x.created || Date.now(), status: 'local', source: 'pwa' };
-      S.saved.unshift(e); added++;
+      S.saved.unshift(e); added.push(e);
     }
-    save(); openMenu('saved'); toast(added ? `Added ${plural(added, 'game')}: sending for review` : 'Those games are already here');
-    for (const e of S.saved.filter((s) => s.status === 'local' && s.source === 'pwa')) await sendOne(e);
-  } catch (e) { msg.textContent = e.message || String(e); }
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();   // close the keyboard
+    save(); clearHash(); openMenu('saved');
+    toast(added.length ? `Added ${plural(added.length, 'game')} from the offline app: sending for review` : 'Those games are already here', 4000);
+    for (const e of added) await sendOne(e);
+  } catch (e) { pasteMsg(e.message || String(e)); }
+}
+// The tile's paste box on the start and end screens.
+function pasteZone() {
+  return TARGET === 'tile' ? `<label class="zonewrap"><span class="small muted">Games from the offline app</span><textarea id="pasteZone" class="paste zone" rows="1" placeholder="Tap here, then Paste" oninput="pasteInput(this)" onblur="zoneBlur()"></textarea></label>` : '';
+}
+function zoneBlur() { if (sideLater) { sideLater = false; setTimeout(renderSide, 300); } }
+function clearHash() {
+  if (location.hash !== '#paste') return;
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { try { location.hash = ''; } catch (e2) { /* keep it */ } }
 }
 // ---------------- the offline app: service worker, install
 let installEvt = null;
@@ -1220,6 +1279,15 @@ function boot() {
   window.addEventListener('offline', () => renderAll());
   renderAll();
   loadBook(); loadEngine(); setupPwa();
+  document.addEventListener('paste', (ev) => {      // a paste anywhere (Ctrl+V on a computer, or into a box)
+    const t = ev.clipboardData && ev.clipboardData.getData('text');
+    const box = ev.target && (ev.target.id === 'pasteZone' || ev.target.id === 'pasteBox');
+    if (t && /BGPLAY-(GAMES|BOOK) /.test(t)) { ev.preventDefault(); importText(t); }
+    else if (box && t) { ev.preventDefault(); pasteMsg(notOurs()); }
+  });
+  const route = () => { if (TARGET === 'tile' && location.hash === '#paste' && S.ui.menu !== 'paste') openPaste('games'); };
+  window.addEventListener('hashchange', route); route();
+  if (TARGET === 'pwa' && unsent().length) prepareBundle();
   if (TARGET === 'tile' && window.claude && typeof window.claude.use === 'function') {
     window.claude.use('db').then((x) => { CAP.db = x; if (x) { flushQueue(); watchReviews(); } }).catch(() => {});
     window.claude.use('mcp').then((x) => { CAP.mcp = x; }).catch(() => {});

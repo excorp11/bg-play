@@ -17,7 +17,8 @@ When you're online it checks for a new version in the background.
 - Open Sage plays at 1, 2, 3 or 4 ply; you can see the plays it compared after each of its moves.
 - Your checker plays and cube decisions are analysed at 3-ply while you play; your ER (eXtreme Gammon's PR formula and
   decision counting) is shown when the game ends.
-- Finished games can be saved as `.mat` files and passed to the BG Play tile in Claude for a full review.
+- Finished games can be saved as `.mat` files for a full review in Claude: **Send to the tile** copies them and opens
+  the BG Play tile, where you tap the box and Paste (you need a connection for that step).
 
 Your games stay in this browser's storage on the device; nothing is sent anywhere.
 

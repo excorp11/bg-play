@@ -93,7 +93,11 @@
   .stepper { display: inline-flex; align-items: center; gap: 8px; } .stepper b { min-width: 2ch; text-align: center; font-size: 16px; }
   .saved { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
   .sv { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
-  textarea.paste { width: 100%; min-height: 120px; font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); color: var(--ink); margin: 6px 0; }
+  textarea.paste { width: 100%; min-height: 120px; font: 16px ui-monospace, monospace; word-break: break-all; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); color: var(--ink); margin: 6px 0; }
+  textarea.paste.zone { min-height: 46px; height: 46px; resize: none; overflow: hidden; margin: 0; padding: 12px 10px; font: 15px/1.35 system-ui, sans-serif; border: 1.5px dashed var(--line); border-radius: 10px; background: var(--panel); flex: none; }
+  textarea.paste.zone::placeholder { color: var(--muted); }
+  .zonewrap { display: flex; flex-direction: column; gap: 3px; flex: none; }
+  @supports (-webkit-touch-callout: none) { textarea.paste.zone { font-size: 16px; } }
   .toast { position: fixed; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 9px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 30; max-width: 92vw; text-align: center; }
   .toast.show { opacity: .94; }
   #update { position: fixed; left: 50%; top: max(8px, env(safe-area-inset-top)); transform: translateX(-50%); z-index: 31; display: none; }
@@ -115,7 +119,7 @@
 <div class="ov" id="ovMenu" onclick="if (event.target === this) closeMenu()"><div class="sheet" id="menu"></div></div>
 <div class="toast" id="toast"></div>
 <button id="update" class="primary" onclick="location.reload()">A new version is ready: tap to reload</button>
-<script>window.BGP_TARGET="pwa";window.BGP_VERSION="2026.11.25-e603ac2e";window.BGP_TILE_URL="https://claude.ai/artifact/Sr472PM5geY9AhTPzhwWHt";window.BGP_TRIGGER="";</script>
+<script>window.BGP_TARGET="pwa";window.BGP_VERSION="2026.11.25-35f34f0e";window.BGP_TILE_URL="https://claude.ai/artifact/Sr472PM5geY9AhTPzhwWHt";window.BGP_TRIGGER="";</script>
 <script src="rules.js"></script>
 <script src="app.js"></script>
 </body>
