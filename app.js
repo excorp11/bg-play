@@ -952,7 +952,7 @@ function overPanel(gm) {
   if (canSave) h += savedAlready ? btn(savedLabel(savedAlready), 'openMenu(\'saved\')') : btn('Save for full analysis', 'saveForAnalysis()', '', !gm.er);
   h += btn(isMatch ? (M.over ? 'New match' : 'Next game') : 'Next game', 'nextGame()', 'primary') + '</div>';
   if (canSave) h += `<div class="row">${btn('Download .mat', 'downloadMat()')}${isMatch ? '' : ''}</div>`;
-  else h += `<div class="muted small">The match is saved for full analysis when it ends (or from the menu).</div>`;
+  else h += `<div class="muted small">When the match ends you can save it for full analysis.</div>`;
   return h;
 }
 const decPlayed = (d) => (d.k === 'M' ? `${d.dice[0]}-${d.dice[1]} ${d.played}` : { R: 'No double', D: 'Double', T: 'Take', P: 'Pass', B: 'Beaver' }[d.k]);
