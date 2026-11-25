@@ -381,6 +381,13 @@ async function userMoveStart(token) {
   }
   const dec = curMoveDec(), rk = moveRank(dec, 'lo');
   if (S.set.autoBear && R.noContact(gm.board) && R.allHome(gm.board) && !t.steps.length) {
+    const gp = greedyPlay(t);
+    if (gp) {
+      renderAll(); await sleep(350 * delay()); if (!live(token) || gm.phase !== 'move' || t.steps.length) return;
+      await playSeq(t, gp.seq); if (!live(token)) return;
+      if (t.done) return finishUserMove(t, true);
+      return renderAll();
+    }
     renderAll();
     let r, spread; try { r = await moveRank(dec, 'hi', AUTO_PLY); spread = await playSpread(r, dec, 'hi', AUTO_PLY); } catch (e) { r = null; }
     if (!live(token) || gm.phase !== 'move' || t.steps.length) return;
@@ -392,6 +399,15 @@ async function userMoveStart(token) {
     }
   }
   renderAll();
+}
+// Greedy bear-off (the auto-bearoff setting, 2026-11-25): with no contact and all your checkers home, the play that
+// takes off two checkers (four with doubles, or every one that's left) when the roll can and only one board does;
+// else null and the roll waits for you, unless every play is within 0.001 at 3-ply (the earlier rule, kept). In 800
+// bear-off rolls from races Open Sage played out, the greedy play was its 4-ply best every time.
+function greedyPlay(t) {
+  const left = R.counts(t.start).me, want = Math.min(t.doubles ? 4 : 2, left);
+  const hits = [...t.L.values()].filter((e) => left - R.counts(e.board).me === want);
+  return hits.length === 1 ? hits[0] : null;
 }
 // The decision record for the roll you're playing (its ranking starts while you think).
 function curMoveDec() {
@@ -1232,7 +1248,7 @@ function renderMenu() {
     h += `<h4>Resign</h4><div class="row">${btn(`Single (${R.pointsFor(1, gm.cube, gm.rules)})`, 'userResign(1)')}${jac ? '' : btn(`Gammon (${R.pointsFor(2, gm.cube, gm.rules)})`, 'userResign(2)') + btn(`Backgammon (${R.pointsFor(3, gm.cube, gm.rules)})`, 'userResign(3)')}</div>`;
   }
   h += '</section><section>';
-  h += `<h4>Play</h4><div class="tograw">${tog('autoBear', 'Auto-bearoff (no contact, no real choice)')}${tog('autoRoll', 'Roll for me when I can\'t double')}${tog('autoForced', 'Play forced moves for me')}${tog('autoDone', 'Finish the turn without Done')}</div>`;
+  h += `<h4>Play</h4><div class="tograw">${tog('autoBear', 'Auto-bearoff (no contact: take off 2, or 4 on doubles)')}${tog('autoRoll', 'Roll for me when I can\'t double')}${tog('autoForced', 'Play forced moves for me')}${tog('autoDone', 'Finish the turn without Done')}</div>`;
   h += `<h4>Board</h4><div class="tograw">${tog('pips', 'Pip counts')}${tog('swapColour', 'Swap colours')}${tog('mirror', 'Home board on the left')}</div>${seg('speed', [['normal', 'Normal'], ['fast', 'Fast'], ['off', 'No animation']])}`;
   h += `<h4>Saved games</h4>${btn(`Saved games (${S.saved.length})`, 'openMenu(\'saved\')')}`;
   h += `<h4>Engine</h4><div class="field">Workers ${['1', '2', '4', '6'].map((n) => btn(n, `setWorkers(${n})`, S.set.workers === +n ? 'on' : '')).join('')}</div>`;
