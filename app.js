@@ -349,6 +349,7 @@ function cubePre(gm) {
 }
 async function userPreroll(token) {
   const gm = S.game;
+  if (gm.autoRollOn) return userRoll(true);         // the Auto-roll switch: every turn rolled for you, no doubling
   if (!canDbl(gm, 'me')) { if (S.set.autoRoll) userRoll(); else renderAll(); return; }
   const pre = cubePre(gm);
   // Auto-bearoff: with no contact and all your checkers home, roll for you when doubling isn't a real decision.
@@ -953,8 +954,21 @@ function gamePanel(gm) {
   } else if (gm.phase === 'over') h += overPanel(gm);
   else h += `<div class="status run">${esc(statusText || 'Open Sage is thinking…')}</div>`;
   if (S.ui.retry && gm.phase !== 'over') h += btn('Retry', 'S.ui.retry=false; drive()');
+  if (gm.phase !== 'over') h += autoRollSwitch(gm);
   if (gm.phase !== 'over' && S.set.showBot) h += botPanel(gm);
   return h;
+}
+// Auto-roll (the user's request, 2026-11-26: closed out, or a race he won't double in): while it's on, every turn of
+// yours is rolled for you, even with the cube in reach, so you can't double until you switch it off. It belongs to the
+// game, so each new game starts with it off.
+function autoRollSwitch(gm) {
+  return `<label class="tog autoroll"><input type="checkbox" ${gm.autoRollOn ? 'checked' : ''} onchange="setAutoRoll(this.checked)"> Auto-roll` +
+    `<span class="muted small">${gm.autoRollOn ? 'on: every turn rolled for you, no doubling' : 'roll every turn for me'}</span></label>`;
+}
+function setAutoRoll(on) {
+  const gm = S.game; if (!gm || gm.phase === 'over') return;
+  gm.autoRollOn = !!on; save();
+  if (on && gm.phase === 'preroll' && gm.onRoll === 'me') userRoll(true); else renderAll();
 }
 function botPanel(gm) {
   const L = gm.botLog[gm.botLog.length - 1]; if (!L) return '';

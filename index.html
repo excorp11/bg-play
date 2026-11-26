@@ -88,6 +88,8 @@
   .tograw { display: flex; flex-direction: column; gap: 2px; }
   .tog { display: flex; align-items: center; gap: 8px; min-height: 38px; cursor: pointer; }
   .tog input { width: 20px; height: 20px; accent-color: var(--accent); }
+  .tog.autoroll { flex-wrap: wrap; column-gap: 8px; row-gap: 0; padding: 2px 0; }
+  .tog.autoroll .small { flex: 1 1 auto; }
   .field { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
   .field button { min-width: 44px; }
   .stepper { display: inline-flex; align-items: center; gap: 8px; } .stepper b { min-width: 2ch; text-align: center; font-size: 16px; }
@@ -121,7 +123,7 @@
 <div class="ov" id="ovMenu" onclick="if (event.target === this) closeMenu()"><div class="sheet" id="menu"></div></div>
 <div class="toast" id="toast"></div>
 <button id="update" class="primary" onclick="location.reload()">A new version is ready: tap to reload</button>
-<script>window.BGP_TARGET="pwa";window.BGP_VERSION="2026.11.25-ed05906d";window.BGP_TILE_URL="https://claude.ai/artifact/Sr472PM5geY9AhTPzhwWHt";window.BGP_TRIGGER="";</script>
+<script>window.BGP_TARGET="pwa";window.BGP_VERSION="2026.11.26-816e4e55";window.BGP_TILE_URL="https://claude.ai/artifact/Sr472PM5geY9AhTPzhwWHt";window.BGP_TRIGGER="";</script>
 <script src="rules.js"></script>
 <script src="app.js"></script>
 </body>

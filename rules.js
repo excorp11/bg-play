@@ -132,20 +132,46 @@
       found.sort((a, b) => a.length - b.length || a.slice(0, -1).filter((s) => s.hit).length - b.slice(0, -1).filter((s) => s.hit).length);
       return found[0];
     }
-    // Tap on a point that holds none of your checkers (empty, or an opposing blot): the two single-die moves that make
-    // it, each checker going straight there by one die, as if each had been tapped (4-2 at the start: tap the 4 point
-    // = 8/4 6/4). The die shown first is tried first. null when no such pair keeps the turn legal.
+    // Tap on a point that holds none of your checkers (empty, or an opposing blot): two checkers made to land there, as
+    // if each had been tapped (4-2 at the start: tap the 4 point = 8/4 6/4). Other rolls: one die each, the die shown
+    // first tried first. Doubles: each checker by one or more of the dice left, fewest dice first (4-4, tap the 5
+    // point: 9/5(2), else 9/5 13/5, else 13/5(2)). null when no pair keeps the turn legal.
     makePoint(p) {
       if (!(p >= 1 && p <= 24) || this.board[p] > 0 || this.board[p] < -1) return null;
       const rem = this.remaining(); if (rem.length < 2) return null;
-      const orders = this.doubles ? [[rem[0], rem[0]]] : [[rem[0], rem[1]], [rem[1], rem[0]]];
-      for (const [a, b] of orders) {
+      if (this.doubles) return this.makeWithDoubles(p, rem[0], rem.length);
+      for (const [a, b] of [[rem[0], rem[1]], [rem[1], rem[0]]]) {
         const src = (d) => (this.board[25] > 0 ? 25 : p + d);
         const m1 = src(a) <= 25 ? this.allowed(src(a), a) : null; if (!m1 || m1.to !== p) continue;
         this.apply(m1);
         const m2 = src(b) <= 25 ? this.allowed(src(b), b) : null;
         this.undo();
         if (m2 && m2.to === p) return [m1, m2];
+      }
+      return null;
+    }
+    // Doubles: one checker from p + ka*d in ka steps, the other from p + kb*d in kb steps (25 = the bar); your other
+    // checkers on the bar enter first (they must, and with doubles there's one entry point). The fewest dice first,
+    // then the shorter of the longer paths (13/5(2) before 9/5 17/5 with 4-4).
+    makeWithDoubles(p, d, n) {
+      const onBar = this.board[25], pairs = [];
+      for (let ka = 1; ka < n; ka++) for (let kb = ka; ka + kb <= n; kb++) {
+        const sa = p + ka * d, sb = p + kb * d; if (sb > 25) continue;
+        const ent = (sa === 25 ? 1 : 0) + (sb === 25 ? 1 : 0), e = ka === 1 && kb === 1 && ent === 2 ? 0 : Math.max(0, onBar - ent);
+        if (e + ka + kb <= n) pairs.push([ka, kb, e]);
+      }
+      pairs.sort((x, y) => x[0] + x[1] + x[2] - (y[0] + y[1] + y[2]) || x[1] - y[1]);
+      for (const [ka, kb, e] of pairs) {
+        // the order of the steps: one checker then the other, the other way round, or turn about (two checkers on the
+        // bar both enter before either moves on); entries of the other checkers on the bar come first
+        const E = new Array(e).fill(2), A = new Array(ka).fill(0), B = new Array(kb).fill(1), alt = [];
+        for (let i = 0; i < kb; i++) { if (i < ka) alt.push(0); alt.push(1); }
+        for (const plan of [A.concat(B), B.concat(A), alt].map((q) => E.concat(q))) {
+          const at = [p + ka * d, p + kb * d, 25], steps = [];
+          for (const w of plan) { const m = this.allowed(at[w], d); if (!m) break; this.apply(m); steps.push(m); if (w < 2) at[w] = m.to; }
+          for (let i = 0; i < steps.length; i++) this.undo();
+          if (steps.length === plan.length && at[0] === p && at[1] === p) return steps;
+        }
       }
       return null;
     }
