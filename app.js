@@ -350,13 +350,11 @@ function cubePre(gm) {
 async function userPreroll(token) {
   const gm = S.game;
   if (gm.autoRollOn) return userRoll(true);         // the Auto-roll switch: every turn rolled for you, no doubling
+  // "Roll for me when I can't double" rolls only when doubling isn't possible: Open Sage owns the cube, the Crawford
+  // game, or a match cube already worth the match. With the cube in reach the turn waits for Roll or Double, even when
+  // doubling would be a mistake (the user's rule, 2026-11-26; auto-bearoff used to roll then).
   if (!canDbl(gm, 'me')) { if (S.set.autoRoll) userRoll(); else renderAll(); return; }
-  const pre = cubePre(gm);
-  // Auto-bearoff: with no contact and all your checkers home, roll for you when doubling isn't a real decision.
-  if (S.set.autoBear && R.noContact(gm.board) && R.allHome(gm.board)) {
-    const probe = { k: 'R', board: gm.board.slice(), g: gFor(gm, 'me') }; hidden(probe, '_c', cubeEval(gm.board.slice(), AUTO_PLY, gFor(gm, 'me'), 'hi')); hidden(probe, '_c3', true);
-    analyzeDecision(probe, 'hi').then((res) => { if (!live(token) || gm.phase !== 'preroll' || gm.onRoll !== 'me') return; if (!res.counted && res.best === 'No double') userRoll(true); else renderAll(); });
-  }
+  cubePre(gm);                                       // the 4-ply analysis of this cube decision (for the ER) starts now
   renderAll();
 }
 function userRoll(auto) {
@@ -1262,7 +1260,7 @@ function renderMenu() {
     h += `<h4>Resign</h4><div class="row">${btn(`Single (${R.pointsFor(1, gm.cube, gm.rules)})`, 'userResign(1)')}${jac ? '' : btn(`Gammon (${R.pointsFor(2, gm.cube, gm.rules)})`, 'userResign(2)') + btn(`Backgammon (${R.pointsFor(3, gm.cube, gm.rules)})`, 'userResign(3)')}</div>`;
   }
   h += '</section><section>';
-  h += `<h4>Play</h4><div class="tograw">${tog('autoBear', 'Auto-bearoff (no contact: take off 2, or 4 on doubles)')}${tog('autoRoll', 'Roll for me when I can\'t double')}${tog('autoForced', 'Play forced moves for me')}${tog('autoDone', 'Finish the turn without Done')}</div>`;
+  h += `<h4>Play</h4><div class="tograw">${tog('autoBear', 'Auto-bearoff (no contact: take off 2, or 4 on doubles)')}${tog('autoRoll', 'Roll for me when I can\'t double (Open Sage owns the cube)')}${tog('autoForced', 'Play forced moves for me')}${tog('autoDone', 'Finish the turn without Done')}</div>`;
   h += `<h4>Board</h4><div class="tograw">${tog('pips', 'Pip counts')}${tog('swapColour', 'Swap colours')}${tog('mirror', 'Home board on the left')}</div>${seg('speed', [['normal', 'Normal'], ['fast', 'Fast'], ['off', 'No animation']])}`;
   h += `<h4>Saved games</h4>${btn(`Saved games (${S.saved.length})`, 'openMenu(\'saved\')')}`;
   h += `<h4>Engine</h4><div class="field">Workers ${['1', '2', '4', '6'].map((n) => btn(n, `setWorkers(${n})`, S.set.workers === +n ? 'on' : '')).join('')}</div>`;
