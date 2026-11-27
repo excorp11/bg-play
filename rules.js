@@ -383,10 +383,12 @@
   // 'bot'. rules: {type: 'cash', jacoby, beavers} | {type: 'match', length}. Returns per game {n, rules, score: {me, bot},
   // crawford, pos: [...], result}, pos in game order:
   //   {type: 'roll', side, turn, before (the roller's view), dice [high, low], steps, after, name, n (legal plays), cube}
-  //   {type: 'nodouble', side: 'me', turn, board, cube}    your turns with cube access on which you rolled
+  //   {type: 'nodouble', side: 'me', turn, board, cube}    your turns with cube access on which you rolled (and, with
+  //     opts.botNoDoubles, Open Sage's too: side 'bot', board from its view; the progress tracker scores them)
   //   {type: 'double', side, turn, board (the doubler's view), cube (before), value, answer: 'take'|'drop'|'beaver', beaver}
   // cube: {value, owner: 0 | 'me' | 'bot'}. Turn numbers count every roll from the opening roll (turn 1).
-  function replayGames(parsed, rules) {
+  function replayGames(parsed, rules, opts) {
+    const botND = !!(opts && opts.botNoDoubles);
     const out = []; let crawUsed = false;
     const sideName = (s) => (s === 1 ? 'me' : 'bot');
     parsed.games.forEach((G) => {
@@ -406,6 +408,7 @@
           if (turn > 0 && pos.length && pos[pos.length - 1].type === 'roll' && pos[pos.length - 1].side === s) fail('the same side rolled twice');
           turn++;
           if (s === 'me' && turn > 1 && doubledThisTurn !== 1 && R_canDouble('me', cube, rules, ctx)) pos.push({ type: 'nodouble', side: 'me', turn, board: B.slice(), cube: { ...cube } });
+          else if (botND && s === 'bot' && turn > 1 && doubledThisTurn !== 2 && R_canDouble('bot', cube, rules, ctx)) pos.push({ type: 'nodouble', side: 'bot', turn, board: flip(B), cube: { ...cube } });
           doubledThisTurn = 0;
           const before = s === 'me' ? B.slice() : flip(B), [d1, d2] = e.dice;
           const lp = legalPlays(before, d1, d2);

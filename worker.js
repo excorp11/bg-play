@@ -38,6 +38,16 @@ const E = {
   // cand is the mover's board after the play: if it ends the game, the mover has won.
   evalN: (b, c, ply, g) => { const o = over(c, g); return o ? { e: o.e, p: o.probs } : take(M._te_eval(put(buf.b, b), put(buf.c, c), ply, ...G(g))); },
   cube: (b, ply, g) => { const o = over(b, g); return o ? finished(o) : take(M._te_cube(put(buf.b, b), ply, ...G(g))); },
+  // For a roll's luck (the progress tracker): the best play's 1-ply equity for each of the 21 rolls (1-1, 2-1, 2-2, 3-1,
+  // ... 6-6: high die 1 to 6, low die 1 to high), the position unchanged when a roll has no move.
+  luck: (b, g) => {
+    const out = [];
+    for (let a = 1; a <= 6; a++) for (let c = 1; c <= a; c++) {
+      const ms = E.moves(b, a, c, g);
+      out.push(ms.length ? Math.max(...ms.map((m) => m.e)) : E.evalN(b, b, 1, g).e);
+    }
+    return out;
+  },
 };
 async function init(weights, manifest) {
   const t0 = performance.now();
@@ -65,6 +75,7 @@ self.onmessage = async (ev) => {
       case 'moves': result = E.moves(m.board, m.d1, m.d2, m.g); break;
       case 'eval': result = E.evalN(m.board, m.cand, m.ply, m.g); break;
       case 'cube': result = E.cube(m.board, m.ply, m.g); break;
+      case 'luck': result = E.luck(m.board, m.g); break;
       default: throw new Error('unknown command ' + m.cmd);
     }
     self.postMessage({ id: m.id, ok: true, result, ms: performance.now() - t0 });
