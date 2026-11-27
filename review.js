@@ -2018,15 +2018,18 @@ try { new ResizeObserver(() => { const r = $('board').getBoundingClientRect(), k
 // ------------------------------------------------------------- BG Play review: the game's positions, one at a time
 // Items (from BG Play): {id, who: 'me'|'bot' (on roll), board (its view), dice | null, cube {value, owner 0|1|2},
 // game (this page's S.game, from the side on roll), played: {after, name, by} | {action, by}, answer?: {action, by},
-// cost (your decision's 4-ply cost in the game, or null), err (your error of 0.020 or more), label}.
+// cost (your decision's 4-ply cost in the game, or null), err (your error of 0.020 or more), blunder (0.080 or more),
+// label, base (the label without the cost), costTxt and tier (blunder / error / small: the cost's colour)}.
 const RV = { items: (RVX && RVX.items) || [], idx: 0, mode: 'all', view: 'move', follow: true, cache: new Map(), timer: 0, started: false,
   canExplain: !!(RVX && RVX.explain), bot: (RVX && RVX.botName) || 'Open Sage' };
-const rvList = () => (RV.mode === 'errors' ? RV.items.filter((x) => x.err) : RV.items);
+// Three ways through the game (the user's choice, 2026-11-26): all moves, your errors (0.020 or more), your blunders only
+// (0.080 or more).
+const rvList = () => (RV.mode === 'errors' ? RV.items.filter((x) => x.err) : RV.mode === 'blunders' ? RV.items.filter((x) => x.blunder) : RV.items);
 // Labels for the side on roll (1) and the other side (2): You and Open Sage.
 const rvWho = (s) => { const it = S.rvItem; if (!it) return s === 1 ? 'You' : 'Opponent'; return (s === 1) === (it.who === 'me') ? 'You' : RV.bot; };
 function rvBoot() {
   const X = RVX || {}, errs = RV.items.filter((x) => x.err);
-  RV.mode = X.mode === 'all' || !errs.length ? 'all' : 'errors';
+  RV.mode = X.mode === 'all' || !errs.length ? 'all' : X.mode === 'blunders' && errs.some((x) => x.blunder) ? 'blunders' : 'errors';
   const list = rvList(), i = X.at ? list.findIndex((x) => x.id === X.at) : 0;
   RV.idx = Math.max(0, i);
   rvShow(rvList()[RV.idx]);
@@ -2113,11 +2116,12 @@ function rvSync() { if (!S.rvPlayed || !S.res || S.res.kind !== 'checker') retur
 function rvForce(cands) { if (!S.rvPlayed || !S.res || !S.res.plays) return; const p = S.res.plays.find((x) => sameB(x.b, S.rvPlayed)); if (p && !cands.includes(p)) cands.push(p); }
 const rvTag = (p) => (S.rvPlayed && p.b && sameB(p.b, S.rvPlayed) ? `<span class="mdl played">${S.rvItem && S.rvItem.who === 'me' ? 'you' : 'played'}</span>` : '');
 function rvBar() {
-  const list = rvList(), it = list[RV.idx], nE = RV.items.filter((x) => x.err).length, nA = RV.items.length;
-  return `<div class="rvbar"><button class="icon" onclick="rvClose()" title="Back to the game" aria-label="Back to the game">✕</button>
-    <div class="seg"><button class="${RV.mode === 'errors' ? 'on' : ''}" ${nE ? '' : 'disabled'} onclick="rvMode('errors')">My errors ${nE}</button><button class="${RV.mode === 'all' ? 'on' : ''}" onclick="rvMode('all')" title="${nA} positions">All moves</button></div>
-    <button class="icon" ${RV.idx > 0 ? '' : 'disabled'} onclick="rvGo(-1)" aria-label="Previous position">‹</button><span class="rvpos">${list.length ? RV.idx + 1 : 0} / ${list.length}</span><button class="icon" ${RV.idx < list.length - 1 ? '' : 'disabled'} onclick="rvGo(1)" aria-label="Next position">›</button></div>
-    <div class="rvlabel${it && it.err ? ' bad' : ''}">${it ? esc(it.label) : 'No positions to review.'}</div>`;
+  const list = rvList(), it = list[RV.idx], nE = RV.items.filter((x) => x.err).length, nB = RV.items.filter((x) => x.blunder).length, nA = RV.items.length;
+  const seg = (m, text, n, title) => `<button class="${RV.mode === m ? 'on' : ''}" ${n ? '' : 'disabled'} onclick="rvMode('${m}')" title="${title}">${text}</button>`;
+  return `<div class="rvbarbox"><div class="rvbar"><button class="icon" onclick="rvClose()" title="Back to the game" aria-label="Back to the game">✕</button>
+    <div class="seg">${seg('all', 'All moves', nA, `${nA} positions`)}${seg('errors', `Errors ${nE}`, nE, 'Your errors: 0.020 or more')}${seg('blunders', `Blunders ${nB}`, nB, 'Your blunders: 0.080 or more')}</div>
+    <button class="icon rvprev" ${RV.idx > 0 ? '' : 'disabled'} onclick="rvGo(-1)" aria-label="Previous position">‹</button><span class="rvpos">${list.length ? RV.idx + 1 : 0} / ${list.length}</span><button class="icon" ${RV.idx < list.length - 1 ? '' : 'disabled'} onclick="rvGo(1)" aria-label="Next position">›</button></div></div>
+    <div class="rvlabel">${!it ? 'No positions to review.' : it.base == null ? esc(it.label) : esc(it.base) + (it.costTxt ? (it.costTxt === '(forced)' ? ' (forced)' : ` · <span class="rvcost ${it.tier || 'small'}">${esc(it.costTxt)}</span>`) : '')}</div>`;
 }
 function rvWait() {
   const it = rvList()[RV.idx];

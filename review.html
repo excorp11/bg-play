@@ -192,10 +192,17 @@
 
   /* BG Play review: the bar that steps through the game's positions */
   .rvbar { display: flex; align-items: center; gap: 4px; flex: none; }
+  /* a narrow panel (landscape, small phones): the three modes get a row of their own, under ✕ and ‹ › */
+  .rvbarbox { container-type: inline-size; flex: none; }
   .rvbar .seg { flex: 1; min-width: 0; } .rvbar .seg button { min-height: 32px; font-size: 12.5px; padding: 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .rvbar button.icon { min-width: 34px; min-height: 32px; padding: 0 4px; font-size: 17px; }
+  @container (max-width: 380px) { .rvbarbox .rvbar { flex-wrap: wrap; row-gap: 4px; } .rvbarbox .rvbar .seg { order: 2; flex: 1 0 100%; } .rvbarbox .rvbar .rvprev { margin-left: auto; } }
   .rvpos { font-size: 12px; color: var(--muted); min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .rvlabel { font-size: 12.5px; font-weight: 600; line-height: 1.3; flex: none; } .rvlabel.bad { color: var(--bad); }
+  /* the cost of your decision (the user's colours, 2026-11-26): red a blunder, yellow an error, grey the rest */
+  :root { --rvyel: #957100; }
+  @media (prefers-color-scheme: dark) { :root { --rvyel: #f2c230; } }
+  .rvcost { font-variant-numeric: tabular-nums; } .rvcost.blunder { color: var(--bad); } .rvcost.error { color: var(--rvyel); } .rvcost.small { color: var(--muted); font-weight: 500; }
   .mdl.played { color: #fff; background: var(--bad); border-color: var(--bad); }
   .rvtabs { display: inline-flex; max-width: 100%; vertical-align: middle; margin-bottom: 2px; } .rvtabs button { min-height: 26px !important; font-size: 12.5px; padding: 0 9px; white-space: nowrap; }
   .verdict2.rvplayed { margin-top: 5px; font-weight: 600; white-space: normal; overflow: visible; }

@@ -1008,11 +1008,11 @@ function overPanel(gm) {
     h += `<div class="card er"><div class="erbig">ER ${E.er.toFixed(2)}</div><div class="small">${E.total.toFixed(3)} equity lost × 500 / ${plural(E.n, 'decision')} (${E.nMoves} checker plays, ${E.nCube} cube). Checker ${E.n ? (E.checker * 500 / E.n).toFixed(2) : '0.00'}, cube ${E.n ? (E.cube * 500 / E.n).toFixed(2) : '0.00'}.</div>`;
     const sk = Object.entries(E.skipped).map(([k, n]) => `${n} ${k}`).join(', ');
     if (sk) h += `<div class="muted small">Not counted: ${esc(sk)}.</div>`;
-    const errs = E.errors.filter((d) => d.res.cost >= 0.02);
-    h += `<div class="row" style="margin:8px 0 4px">${btn(errs.length ? `Review: your ${plural(errs.length, 'error')} or every move` : 'Review every move', "openReview('current')", 'primary')}</div>`;
+    const errs = E.errors.filter((d) => d.res.cost >= ERR_MIN), nb = errs.filter((d) => d.res.cost >= BLUNDER_MIN).length;
+    h += `<div class="row" style="margin:8px 0 4px">${btn(errs.length ? `Review: your ${plural(errs.length, 'error')}${nb ? ` (${plural(nb, 'blunder')})` : ''} or every move` : 'Review every move', "openReview('current')", 'primary')}</div>`;
     if (errs.length) {
       h += `<table class="mini errs"><tr><th>Turn</th><th>You</th><th>Best</th><th>Cost</th></tr>`;
-      for (const d of errs) h += `<tr onclick="openReview('current', '${decKey(1, d.turn, d.k)}')"><td>${d.turn}</td><td>${esc(decPlayed(d))}</td><td>${esc(d.res.best)}</td><td class="bad">${d.res.cost.toFixed(3)}</td></tr>`;
+      for (const d of errs) h += `<tr onclick="openReview('current', '${decKey(1, d.turn, d.k)}')"><td>${d.turn}</td><td>${esc(decPlayed(d))}</td><td>${esc(d.res.best)}</td><td class="cost ${tierCls(tierOf(d.res.cost, true))}">${d.res.cost.toFixed(3)}</td></tr>`;
       h += `</table><div class="muted small">Tap a row to open it in the review. Costs at ${ER_PLY}-ply${gm.decisions.some((d) => d.res && d.res.src && d.res.src.startsWith('XG')) ? '; turns 1–2 from the XG opening book' : ''}.</div>`;
     } else h += `<div class="small good">No errors of 0.020 or more.</div>`;
     h += '</div>';
@@ -1066,7 +1066,11 @@ async function copyText(t) { try { await navigator.clipboard.writeText(t); toast
 // frame over the game: each position as the analyzer shows it, 2-, 3-, then 4-ply, Roll out, and in the tile Explain
 // and Go deeper. It gets the positions, the engine's weights, the opening book and (tile) Claude through
 // window.BGP_RV. The game's own workers stop while it is open; the review runs its own.
-const ERR_MIN = 0.020;
+const ERR_MIN = 0.020, BLUNDER_MIN = 0.080;
+// How big a decision's error was (the user's colours, 2026-11-26): red a blunder (0.080 or more), yellow an error (0.020 to
+// 0.080), grey anything smaller, the same bands as the review's arrows. Only counted decisions are errors.
+const tierOf = (c, counted) => (!counted || c == null ? 'small' : c >= BLUNDER_MIN ? 'blunder' : c >= ERR_MIN ? 'error' : 'small');
+const tierCls = (t) => ({ blunder: 'bad', error: 'yel', small: 'muted' }[t]);
 // Your decisions' results in a small form kept with a game: {g: game, t: turn, k, c: cost, n: counted 1/0, b: best}.
 const compactDecs = (decs, g) => decs.filter((d) => d.res && !d.res.err).map((d) => ({ g, t: d.turn, k: d.k, c: +(+d.res.cost).toFixed(4), n: d.res.counted ? 1 : 0, b: String(d.res.best || '') }));
 const relCube = (c, side) => ({ value: c.value, owner: c.owner === 0 ? 0 : c.owner === side ? 1 : 2 });
@@ -1093,25 +1097,32 @@ function decisionsOf(G) {
 // that were errors. costs: decKey -> {c, n, b} (your decisions).
 const decKey = (g, t, k) => `${g}:${t}:${k}`;
 function reviewItems(games, costs) {
-  const items = [], multi = games.length > 1, fmt = (c) => (c.c < 0.0005 ? ' · best' : ` · −${c.c.toFixed(3)}`);
+  const items = [], multi = games.length > 1, txt = (c) => (c.c < 0.0005 ? 'best' : `−${c.c.toFixed(3)}`);
+  // base: the label without the cost; costTxt and tier: the cost and its band (blunder / error / small), coloured by the review
+  const mark = (it, c, forced) => {
+    it.err = !!(c && c.n && c.c >= ERR_MIN); it.blunder = !!(c && c.n && c.c >= BLUNDER_MIN);
+    it.costTxt = forced ? '(forced)' : c ? txt(c) : null; it.tier = c && !forced ? tierOf(c.c, !!c.n) : null;
+    it.label = it.base + (forced ? ' (forced)' : c ? ` · ${txt(c)}` : '');
+    return it;
+  };
   for (const G of games) for (const P of G.pos) {
     const pre = multi ? `Game ${G.n}, turn ${P.turn}` : `Turn ${P.turn}`;
     if (P.type === 'roll') {
       if (!P.n || !P.steps.length) continue;                  // no checker could move
       const mine = P.side === 'me', c = mine ? costs[decKey(G.n, P.turn, 'M')] : null;
-      items.push({ id: decKey(G.n, P.turn, 'M'), who: P.side, board: P.before, dice: P.dice, cube: relCube(P.cube, P.side), game: ctxOf(G, P.side),
-        played: { after: P.after, name: P.name, by: P.side }, cost: c ? c.c : null, err: !!(c && c.n && c.c >= ERR_MIN),
-        label: `${pre} · ${mine ? 'You' : 'Open Sage'} rolled ${P.dice[0]}-${P.dice[1]}: ${P.name}${P.n === 1 ? ' (forced)' : c ? fmt(c) : ''}` });
+      items.push(mark({ id: decKey(G.n, P.turn, 'M'), who: P.side, board: P.before, dice: P.dice, cube: relCube(P.cube, P.side), game: ctxOf(G, P.side),
+        played: { after: P.after, name: P.name, by: P.side }, cost: c ? c.c : null,
+        base: `${pre} · ${mine ? 'You' : 'Open Sage'} rolled ${P.dice[0]}-${P.dice[1]}: ${P.name}` }, c, P.n === 1));
     } else if (P.type === 'nodouble') {
       const c = costs[decKey(G.n, P.turn, 'R')]; if (!c || !c.n || c.c < ERR_MIN) continue;
-      items.push({ id: decKey(G.n, P.turn, 'R'), who: 'me', board: P.board, dice: null, cube: relCube(P.cube, 'me'), game: ctxOf(G, 'me'),
-        played: { action: 'No double', by: 'me' }, cost: c.c, err: true, label: `${pre} · You didn't ${P.cube.owner ? 'redouble' : 'double'}${fmt(c)}` });
+      items.push(mark({ id: decKey(G.n, P.turn, 'R'), who: 'me', board: P.board, dice: null, cube: relCube(P.cube, 'me'), game: ctxOf(G, 'me'),
+        played: { action: 'No double', by: 'me' }, cost: c.c, base: `${pre} · You didn't ${P.cube.owner ? 'redouble' : 'double'}` }, c, false));
     } else if (P.type === 'double') {
       const mineD = P.side === 'me', k = mineD ? 'D' : { take: 'T', drop: 'P', beaver: 'B' }[P.answer], c = costs[decKey(G.n, P.turn, k)];
-      items.push({ id: decKey(G.n, P.turn, k), who: P.side, board: P.board, dice: null, cube: relCube(P.cube, P.side), game: ctxOf(G, P.side),
+      items.push(mark({ id: decKey(G.n, P.turn, k), who: P.side, board: P.board, dice: null, cube: relCube(P.cube, P.side), game: ctxOf(G, P.side),
         played: { action: 'Double', by: P.side }, answer: { action: { take: 'Take', drop: 'Pass', beaver: 'Beaver' }[P.answer], by: other(P.side) },
-        cost: c ? c.c : null, err: !!(c && c.n && c.c >= ERR_MIN),
-        label: `${pre} · ${mineD ? 'You' : 'Open Sage'} ${P.cube.owner ? 'redoubled' : 'doubled'} to ${P.value}, ${mineD ? 'Open Sage' : 'you'} ${{ take: 'took', drop: 'passed', beaver: 'beavered' }[P.answer]}${c ? fmt(c) : ''}` });
+        cost: c ? c.c : null,
+        base: `${pre} · ${mineD ? 'You' : 'Open Sage'} ${P.cube.owner ? 'redoubled' : 'doubled'} to ${P.value}, ${mineD ? 'Open Sage' : 'you'} ${{ take: 'took', drop: 'passed', beaver: 'beavered' }[P.answer]}` }, c, false));
     }
   }
   return items;

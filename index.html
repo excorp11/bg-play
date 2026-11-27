@@ -65,6 +65,12 @@
   .btnlink { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-height: 40px; padding: 0 12px; }
   .btnlink.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
   .muted { color: var(--muted); } .small { font-size: 12px; } .bad { color: var(--bad); } .good { color: var(--good); }
+  /* yellow for errors (0.020 to 0.080), red for blunders, grey for the rest */
+  :root { --yel: #957100; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) { --yel: #f2c230; } }
+  :root[data-theme=dark] { --yel: #f2c230; }
+  .yel { color: var(--yel); }
+  td.cost { font-weight: 650; font-variant-numeric: tabular-nums; }
   .botbox { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px 9px; font-size: 13px; }
   .botbox summary { cursor: pointer; } .botbox[open] summary { margin-bottom: 4px; }
   table.mini { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12.5px; margin: 4px 0; }
@@ -123,7 +129,7 @@
 <div class="ov" id="ovMenu" onclick="if (event.target === this) closeMenu()"><div class="sheet" id="menu"></div></div>
 <div class="toast" id="toast"></div>
 <button id="update" class="primary" onclick="location.reload()">A new version is ready: tap to reload</button>
-<script>window.BGP_TARGET="pwa";window.BGP_VERSION="2026.11.26-ed7ec8ba";window.BGP_TILE_URL="https://claude.ai/artifact/Sr472PM5geY9AhTPzhwWHt";window.BGP_TRIGGER="";</script>
+<script>window.BGP_TARGET="pwa";window.BGP_VERSION="2026.11.27-c43b4eb7";window.BGP_TILE_URL="https://claude.ai/artifact/Sr472PM5geY9AhTPzhwWHt";window.BGP_TRIGGER="";</script>
 <script src="rules.js"></script>
 <script src="app.js"></script>
 </body>
