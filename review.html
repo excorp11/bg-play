@@ -6,19 +6,25 @@
 <title>BG Play review</title>
 <style>
   :root {
+    color-scheme: light dark;
     --bg: #efece4; --panel: #fbfaf7; --ink: #1d1d1b; --muted: #6b6a65; --line: #dcd8cd;
     --accent: #2f5d8a; --accent-ink: #fff; --good: #2e7d4f; --warn: #b5651d; --bad: #b23a3a;
     --c-blue: #2f5d8a; --c-blue-edge: #1e4166; --c-blue-ink: #fff; --c-white: #fbfaf7; --c-white-edge: #6f6c63; --c-white-ink: #222;
     --me: var(--c-blue); --me-edge: var(--c-blue-edge); --me-ink: var(--c-blue-ink); --opp: var(--c-white); --opp-edge: var(--c-white-edge); --opp-ink: var(--c-white-ink);
     --felt: #d9cfb7; --frame: #6b5a43; --pt1: #a8875c; --pt2: #e9e0cc; --sel: #e7eef6;
   }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #151514; --panel: #1f1f1d; --ink: #ecebe6; --muted: #a3a199; --line: #34332f;
+  /* dark: the system's setting, unless the page is told otherwise (data-theme), as in BG Play */
+  @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) {
+      --bg: #151514; --panel: #1f1f1d; --ink: #ecebe6; --muted: #a3a199; --line: #34332f;
+      --accent: #6fa3d8; --accent-ink: #0d1b28; --good: #6cc392; --warn: #e3a25f; --bad: #e07a7a;
+      --c-blue: #5b8fc4; --c-blue-edge: #9cc0e6; --c-white: #efece4; --c-white-edge: #8f8b80;
+      --felt: #3a352b; --frame: #22201b; --pt1: #7a6243; --pt2: #575043; --sel: #22303d; } }
+  :root[data-theme=dark] {
+      --bg: #151514; --panel: #1f1f1d; --ink: #ecebe6; --muted: #a3a199; --line: #34332f;
       --accent: #6fa3d8; --accent-ink: #0d1b28; --good: #6cc392; --warn: #e3a25f; --bad: #e07a7a;
       --c-blue: #5b8fc4; --c-blue-edge: #9cc0e6; --c-white: #efece4; --c-white-edge: #8f8b80;
       --felt: #3a352b; --frame: #22201b; --pt1: #7a6243; --pt2: #575043; --sel: #22303d; }
-  }
-  /* Swap colour: the bottom side (on roll) plays White, the top side Blue. */
+  /* Swap colours: the bottom side (on roll) plays White, the top side Blue. */
   body.swapc { --me: var(--c-white); --me-edge: var(--c-white-edge); --me-ink: var(--c-white-ink); --opp: var(--c-blue); --opp-edge: var(--c-blue-edge); --opp-ink: var(--c-blue-ink); }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
@@ -111,6 +117,16 @@
   .list td.err { color: var(--bad); font-size: 12px; }
   .list td.d { font-size: 10.5px; color: var(--muted); text-align: right; }
   .list tr.first td.err { color: var(--good); }
+  /* each play's error in the user's colours (2026-11-27, XG's error threshold): red a blunder (0.080 or more), yellow an error (0.020 to 0.080), grey a close play; the best green */
+  .list td.err.blunder { color: var(--bad); } .list td.err.error { color: var(--yel); } .list td.err.close { color: var(--muted); }
+  :root { --yel: #957100; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) { --yel: #f2c230; } }
+  :root[data-theme=dark] { --yel: #f2c230; }
+  /* a play equal to the best as shown (−0.000) is green too; costs in the cube verdict lines take the same colours */
+  .list td.err.best { color: var(--good); }
+  .ecost.blunder { color: var(--bad); } .ecost.error { color: var(--yel); } .ecost.close { color: var(--muted); } .ecost.best { color: var(--good); }
+  .cubebox b.best { color: var(--good); }
+  .row button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 650; }
   .probs { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
   .cubebox { border: 1px solid var(--line); border-radius: 9px; background: var(--panel); padding: 4px 8px; }
   .cubebox .verdict { font-size: 15px; font-weight: 700; margin-bottom: 2px; }
@@ -165,9 +181,10 @@
   /* Portrait: board across the top, the panel full width below it (rankings, cube table, explanation). */
   @media (orientation: portrait) {
     #app { flex-direction: column; gap: 6px; }
-    #boardWrap { flex: none; width: 100%; height: min(84vw, 50vh); }   /* setup: tall enough for finger entry */
-    body.results #boardWrap { height: min(72vw, 42vh); }
-    body.explain #boardWrap { height: min(58vw, 34vh); }
+    /* the trays run along the board's top and bottom in portrait (BG Play's convention), so the board is about 50 px taller */
+    #boardWrap { flex: none; width: 100%; height: min(calc(84vw + 52px), 56vh); }   /* setup: tall enough for finger entry */
+    body.results #boardWrap { height: min(calc(72vw + 48px), 47vh); }
+    body.explain #boardWrap { height: min(calc(58vw + 48px), 39vh); }
     #side, body.results #side, body.explain #side { width: 100%; flex: 1 1 0; min-height: 0; }
     .xbody { font-size: 14.5px; line-height: 1.5; padding: 10px 12px; }
     .xfoot { font-size: 12.5px; }
@@ -199,11 +216,9 @@
   @container (max-width: 380px) { .rvbarbox .rvbar { flex-wrap: wrap; row-gap: 4px; } .rvbarbox .rvbar .seg { order: 2; flex: 1 0 100%; } .rvbarbox .rvbar .rvprev { margin-left: auto; } }
   .rvpos { font-size: 12px; color: var(--muted); min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .rvlabel { font-size: 12.5px; font-weight: 600; line-height: 1.3; flex: none; } .rvlabel.bad { color: var(--bad); }
-  /* the cost of your decision (the user's colours, 2026-11-26): red a blunder, yellow an error, grey the rest */
-  :root { --rvyel: #957100; }
-  @media (prefers-color-scheme: dark) { :root { --rvyel: #f2c230; } }
-  .list td.err.blunder { color: var(--bad); } .list td.err.error { color: var(--rvyel); } .list td.err.close { color: var(--muted); }
-  .rvcost { font-variant-numeric: tabular-nums; } .rvcost.blunder { color: var(--bad); } .rvcost.error { color: var(--rvyel); } .rvcost.small { color: var(--muted); font-weight: 500; }
+  /* the cost of your decision (the user's colours, 2026-11-26/27): red a blunder, yellow an error, grey the rest, green
+     the best (the analyzer page defines --yel, following the theme; its ranked plays carry the same colours) */
+  .rvcost { font-variant-numeric: tabular-nums; } .rvcost.blunder { color: var(--bad); } .rvcost.error { color: var(--yel); } .rvcost.small { color: var(--muted); font-weight: 500; } .rvcost.best { color: var(--good); }
   .mdl.played { color: #fff; background: var(--bad); border-color: var(--bad); }
   .rvtabs { display: inline-flex; max-width: 100%; vertical-align: middle; margin-bottom: 2px; } .rvtabs button { min-height: 26px !important; font-size: 12.5px; padding: 0 9px; white-space: nowrap; }
   .verdict2.rvplayed { margin-top: 5px; font-weight: 600; white-space: normal; overflow: visible; }

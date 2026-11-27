@@ -5,12 +5,11 @@ const DESKTOP = /*DESKTOP*/false;
 // opening book and, in the tile, Claude through window.parent.BGP_RV.
 const RVX = (() => { try { return window.parent !== window ? window.parent.BGP_RV || null : null; } catch (e) { return null; } })();
 const REVIEW = true;
-const rvBand = (e) => { const v = +Math.max(0, e).toFixed(3); return v >= 0.08 ? 'blunder' : v >= 0.02 ? 'error' : 'close'; };
 const START = [0, -2, 0, 0, 0, 0, 5, 0, 3, 0, 0, 0, -5, 5, 0, 0, 0, -3, 0, -5, 0, 0, 0, 0, 2, 0];
 const S = {
   mode: 'setup', board: START.slice(), placing: 1, dice: null, decision: 'checker', roPreset: 'standard',
   cube: { value: 1, owner: 0 }, game: { type: 'money', jacoby: true, beaver: true, len: 7, me: 0, opp: 0, crawford: false },
-  workers: DESKTOP ? Math.min(8, Math.max(2, (navigator.hardwareConcurrency || 4) - 2)) : 4, res: null, sel: 0, preview: null,
+  workers: DESKTOP ? Math.min(8, Math.max(2, (navigator.hardwareConcurrency || 4) - 2)) : Math.max(2, Math.min(6, navigator.hardwareConcurrency || 6)), res: null, sel: 0, preview: null,
 };
 if (DESKTOP) document.body.classList.add('desk');
 const $ = (id) => document.getElementById(id);
@@ -56,7 +55,7 @@ function parseXgid(text) {
     const up = ch >= 'A' && ch <= 'Z', n = up ? ch.charCodeAt(0) - 64 : -(ch.charCodeAt(0) - 96);
     if (i === 0 || i === 25) b[i] = Math.abs(n); else b[i] = n; }
   const turn = +f[3], cpos = +f[2]; if (turn === -1) b = flip(b);
-  const out = { board: b, cube: { value: 2 ** +f[1], owner: cpos === 0 ? 0 : cpos === turn ? 1 : 2 }, dice: /^[1-6][1-6]$/.test(f[4]) ? [+f[4][0], +f[4][1]] : null };
+  const out = { board: b, cube: { value: 2 ** +f[1], owner: cpos === 0 ? 0 : cpos === turn ? 1 : 2 }, dice: /^[1-6][1-6]$/.test(f[4]) ? [Math.max(+f[4][0], +f[4][1]), Math.min(+f[4][0], +f[4][1])] : null };
   const len = +f[8];
   if (len) { const [a, o] = turn === 1 ? [+f[5], +f[6]] : [+f[6], +f[5]]; out.game = { ...S.game, type: 'match', len, me: a, opp: o, crawford: !!(+f[7] & 1) }; }
   else out.game = { ...S.game, type: 'money', jacoby: !!(+f[7] & 1), beaver: !!(+f[7] & 2) };
@@ -69,20 +68,30 @@ function fromXgid(text) {
 
 // ------------------------------------------------------------- board geometry & drawing
 let G = null;
+// Portrait (BG Play's convention, 2026-11-27): the trays leave the side of the board and run along its whole width, the
+// side on roll's along the bottom and the other side's along the top, so the points get the side tray's width (bigger
+// checkers). Landscape keeps the side tray.
+const portrait = () => !!(window.matchMedia && matchMedia('(orientation: portrait)').matches);
 function geometry(W, H) {
-  const m = 3, lh = Math.max(15, Math.min(20, H * 0.055));
-  const pw = (W - 2 * m) / (12 + 0.85 + 0.95);
-  const bw = pw * 0.85, tw = pw * 0.95;
-  const zt = (H - 2 * lh - 2 * m) / 10.6;           // a fifth of a point's length
+  const port = portrait(), m = 3, th = port ? Math.max(24, Math.min(34, H * 0.075)) : 0;
+  const lh = port ? Math.max(14, Math.min(20, (H - 2 * th) * 0.055)) : Math.max(15, Math.min(20, H * 0.055));
+  const pw = (W - 2 * m) / (12 + 0.85 + (port ? 0 : 0.95));
+  const bw = pw * 0.85, tw = port ? 0 : pw * 0.95;
+  const zt = (H - 2 * lh - 2 * m - 2 * th) / 10.6;   // a fifth of a point's length
   const r = Math.max(6, Math.min(pw * 0.47, zt * 0.5));
   const zh = Math.min(zt, 2 * r + 0.6), ph = zt * 5; // checkers stack touching; tap zones follow them
-  const x0 = S.mirror ? m + tw : m;                  // mirrored: the tray comes first, on the left
+  const x0 = S.mirror && !port ? m + tw : m;         // mirrored: the tray comes first, on the left
   const colX = (c) => x0 + (c < 6 ? c * pw : bw + c * pw); // column 0..11 left to right
-  const barX = x0 + 6 * pw, trayX = S.mirror ? m - 2 : x0 + 12 * pw + bw;
-  const top = m + lh, bot = H - m - lh;
-  return { W, H, m, x0, lh, pw, bw, tw, zh, ph, r, colX, barX, trayX, top, bot };
+  const barX = x0 + 6 * pw, trayX = port ? null : S.mirror ? m - 2 : x0 + 12 * pw + bw;
+  const top = m + th + lh, bot = H - m - th - lh;
+  // portrait trays: the strips' rows (top: the side not on roll; bot: the side on roll), slabs from the home side
+  const xL = x0, xR = x0 + 12 * pw + bw, sw = Math.min(13, (xR - xL - 60) / 15);
+  return { W, H, m, x0, lh, pw, bw, tw, zh, ph, r, colX, barX, trayX, top, bot, port, th, xL, xR, sw, trayY: { top: m, bot: H - m - th } };
 }
-// Swap direction mirrors the board: Blue's home board on the left, the bear-off tray on the left.
+// Portrait trays: the x of the k-th borne-off slab, counted from the home side.
+const slabX = (k) => (S.mirror ? G.xL + 4 + k * G.sw : G.xR - 4 - (k + 1) * G.sw);
+// Home board on the left (BG Play's name; "Swap direction" before 2026-11-27) mirrors the board: Blue's home board and the
+// bear-off tray on the left (in portrait the trays run along the top and bottom, from the home side).
 const pointCol = (p) => { const r = p >= 13 ? { c: p - 13, top: true } : { c: 12 - p, top: false }; if (S.mirror) r.c = 11 - r.c; if (rvFlip()) r.top = !r.top; return r; };
 function colPoint(c, isTop) { if (S.mirror) c = 11 - c; if (rvFlip()) isTop = !isTop; return isTop ? 13 + c : 12 - c; }
 
@@ -101,13 +110,14 @@ function drawBoard() {
   let s = `<rect x="0" y="0" width="${G.W}" height="${G.H}" rx="8" fill="var(--frame)"/>`;
   s += `<rect x="${G.x0}" y="${G.top - 2}" width="${12 * G.pw + G.bw}" height="${G.bot - G.top + 4}" fill="var(--felt)"/>`;
   s += `<rect x="${G.barX}" y="${G.top - 2}" width="${G.bw}" height="${G.bot - G.top + 4}" fill="var(--frame)" opacity=".85"/>`;
-  s += `<rect x="${G.trayX + 2}" y="${G.top - 2}" width="${G.tw - 2}" height="${G.bot - G.top + 4}" fill="var(--frame)" opacity=".6"/>`;
+  if (G.port) for (const y of [G.trayY.top, G.trayY.bot]) s += `<rect x="${G.xL}" y="${y + 2}" width="${G.xR - G.xL}" height="${G.th - 4}" rx="5" fill="#000" opacity=".18"/>`;
+  else s += `<rect x="${G.trayX + 2}" y="${G.top - 2}" width="${G.tw - 2}" height="${G.bot - G.top + 4}" fill="var(--frame)" opacity=".6"/>`;
   const ph = G.ph;
   for (let p = 1; p <= 24; p++) {
     const { c, top } = pointCol(p), x = G.colX(c);
     const y1 = top ? G.top : G.bot, y2 = top ? G.top + ph : G.bot - ph;
     s += `<polygon points="${x + 1},${y1} ${x + G.pw - 1},${y1} ${x + G.pw / 2},${y2}" fill="${(rvFlip() ? 25 - p : p) % 2 ? 'var(--pt1)' : 'var(--pt2)'}"/>`;
-    const ly = top ? G.m + G.lh * 0.72 : G.H - G.m - G.lh * 0.22;
+    const ly = top ? G.m + G.th + G.lh * 0.72 : G.H - G.m - G.th - G.lh * 0.22;
     s += `<text x="${x + G.pw / 2}" y="${ly}" font-size="${Math.min(12, G.lh * 0.7)}" font-weight="600" text-anchor="middle" fill="#efe6d2">${p}</text>`;
   }
   // checkers
@@ -148,9 +158,15 @@ function drawBoard() {
     if (S.cube.owner) G.ownedCube = cube; }
   // trays: borne-off (inferred)
   const c = counts(b), offMe = Math.max(0, 15 - c.me), offOpp = Math.max(0, 15 - c.opp);
-  const tx = G.trayX + 2 + (G.tw - 2) / 2, slab = Math.min(6, (ph - 4) / 15);
+  const tx = G.port ? 0 : G.trayX + 2 + (G.tw - 2) / 2, slab = Math.min(6, (ph - 4) / 15);
   const tray = (n, isTop, mine) => {
     let t = '';
+    if (G.port) {                                     // a row of slabs from the home side, the count beyond the last one
+      const y = G.trayY[isTop ? 'top' : 'bot'] + 5, hh = G.th - 10;
+      for (let i = 0; i < n; i++) t += `<rect x="${slabX(i) + 0.5}" y="${y}" width="${G.sw - 1}" height="${hh}" rx="2" fill="${mine ? 'var(--me)' : 'var(--opp)'}" stroke="${mine ? 'var(--me-edge)' : 'var(--opp-edge)'}" stroke-width=".7"/>`;
+      if (n) t += `<text x="${S.mirror ? slabX(n) + 4 : slabX(n - 1) - 4}" y="${y + hh / 2 + 4}" font-size="11" font-weight="700" text-anchor="${S.mirror ? 'start' : 'end'}" fill="#efe6d2">${n}</text>`;
+      return t;
+    }
     for (let i = 0; i < n; i++) {
       const y = isTop ? G.top + 2 + i * slab : G.bot - 2 - (i + 1) * slab;
       t += `<rect x="${tx - G.tw * 0.34}" y="${y}" width="${G.tw * 0.68}" height="${slab - 1}" rx="1.5" fill="${mine ? 'var(--me)' : 'var(--opp)'}" stroke="${mine ? 'var(--me-edge)' : 'var(--opp-edge)'}" stroke-width=".6"/>`;
@@ -159,23 +175,26 @@ function drawBoard() {
     return t;
   };
   s += rvFlip() ? tray(offOpp, false, false) + tray(offMe, true, true) : tray(offOpp, true, false) + tray(offMe, false, true);
-  s += `<text x="${tx}" y="${mid + 4}" font-size="9" text-anchor="middle" fill="#efe6d2" opacity=".8">OFF</text>`;
-  // dice on the board (right half, middle) and the cube on the bar
-  if (S.decision === 'checker' && S.dice && S.mode === 'setup' && !S.rvItem) {
-    const ds = Math.min(G.zh * 0.9, G.pw * 0.8), dx = G.colX(8) + G.pw / 2;
-    S.dice.forEach((d, i) => { s += dieSvg(dx + i * (ds + 6) - (ds + 6) / 2 - ds / 2, mid - ds / 2, ds, d); });
-  }
-  if (S.rvItem && S.decision === 'checker' && S.dice) s += rvDice(mid);   // the roll, under the arrows
+  if (!G.port) s += `<text x="${tx}" y="${mid + 4}" font-size="9" text-anchor="middle" fill="#efe6d2" opacity=".8">OFF</text>`;
+  // the roll on the board, under the arrows, in setup and in the results (BG Play's convention)
+  if (S.decision === 'checker' && S.dice) s += diceOnBoard(mid);
   if (S.mode === 'results' && S.preview) s += previewMarks(S.board, b) + arrows(S.board, b, S.preview.name);
   // an owned cube sits at its owner's end of the bar
   if (S.cube.owner) s += G.ownedCube((S.cube.owner === 1) !== rvFlip() ? G.bot - cs - 4 : G.top + 4, S.cube.value);
   svg.innerHTML = s;
 }
+// The roll (BG Play's convention): in the colours of the side on roll (it follows Swap colours), the higher number first,
+// on the right half of the board whichever side the home boards are on.
+function diceOnBoard(mid) {
+  const ds = Math.min(G.zh * 0.95, G.pw * 0.82, 40), gap = ds * 0.25, cx = rvFlip() ? G.colX(3) : G.colX(9), y = mid - ds / 2;   // Open Sage's roll on the left half
+  const hi = Math.max(S.dice[0], S.dice[1]), lo = Math.min(S.dice[0], S.dice[1]);
+  return `<g class="dice">${dieSvg(cx - ds - gap / 2, y, ds, hi)}${dieSvg(cx + gap / 2, y, ds, lo)}</g>`;
+}
 function dieSvg(x, y, s, v) {
   const P = { 1: [[.5, .5]], 2: [[.27, .27], [.73, .73]], 3: [[.27, .27], [.5, .5], [.73, .73]], 4: [[.27, .27], [.73, .27], [.27, .73], [.73, .73]],
     5: [[.27, .27], [.73, .27], [.5, .5], [.27, .73], [.73, .73]], 6: [[.27, .25], [.73, .25], [.27, .5], [.73, .5], [.27, .75], [.73, .75]] }[v];
-  return `<rect x="${x}" y="${y}" width="${s}" height="${s}" rx="${s * 0.18}" fill="#fff" stroke="#333"/>` +
-    P.map(([a, c]) => `<circle cx="${x + a * s}" cy="${y + c * s}" r="${s * 0.085}" fill="#222"/>`).join('');
+  return `<rect x="${x}" y="${y}" width="${s}" height="${s}" rx="${s * 0.18}" fill="var(--me)" stroke="var(--me-edge)" stroke-width="1.4"/>` +
+    P.map(([a, c]) => `<circle cx="${x + a * s}" cy="${y + c * s}" r="${s * 0.085}" fill="var(--me-ink)"/>`).join('');
 }
 function parseMove(name) {
   const out = [];
@@ -189,19 +208,19 @@ function parseMove(name) {
 }
 function checkerXY(p, k, mine) {
   if (p === 25) return [G.barX + G.bw / 2, G.H / 2 + (rvFlip() ? -1 : 1) * G.zh * 1.1];
-  if (p === 0) return [G.trayX + 2 + (G.tw - 2) / 2, rvFlip() ? G.top + G.zh * 0.8 : G.bot - G.zh * 0.8];
+  if (p === 0) return G.port ? [slabX(Math.max(0, Math.min(14, k))) + G.sw / 2, G.trayY[rvFlip() ? 'top' : 'bot'] + G.th / 2] : [G.trayX + 2 + (G.tw - 2) / 2, rvFlip() ? G.top + G.zh * 0.8 : G.bot - G.zh * 0.8];
   const { c, top } = pointCol(p), kk = Math.max(0, Math.min(4, k));
   return [G.colX(c) + G.pw / 2, top ? G.top + G.zh * (kk + 0.5) : G.bot - G.zh * (kk + 0.5)];
 }
 function arrows(before, after, name) {
   const steps = parseMove(name), usedFrom = {}, usedTo = {}, totalTo = {};
   steps.forEach((s) => { totalTo[s.to] = (totalTo[s.to] || 0) + 1; });
-  const AC = rvArrowColour() || ['#e8871e', '#5a2d00'];   // the review colours the arrows by the play's cost
+  const AC = arrowColour() || ['#e8871e', '#5a2d00'];   // the play's error colour (orange only without a ranking)
   let t = `<defs><marker id="ah" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${AC[0]}" stroke="${AC[1]}" stroke-width="1"/></marker></defs>`;
   for (const s of steps) {
     const nFrom = s.from === 25 ? before[25] : Math.max(0, before[s.from]);
     const kFrom = nFrom - 1 - (usedFrom[s.from] = (usedFrom[s.from] || 0) + 1) + 1;
-    const nTo = s.to === 0 ? 0 : Math.max(0, after[s.to]);
+    const nTo = s.to === 0 ? 15 - counts(after).me : Math.max(0, after[s.to]);   // off: the slab it lands on (portrait)
     const kTo = nTo - totalTo[s.to] + (usedTo[s.to] = (usedTo[s.to] || 0) + 1) - 1;
     const [x1, y1] = checkerXY(s.from, kFrom, true), [x2, y2] = checkerXY(s.to, kTo, true);
     const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
@@ -238,6 +257,7 @@ function hit(px, py) {
     if (x >= G.barX + G.bw && x < G.barX + G.bw + 6 * G.pw) return 6 + Math.floor((x - G.barX - G.bw) / G.pw);
     return -1;
   };
+  if (G.port && (py < G.m + G.th || py > G.H - G.m - G.th)) return null;   // the tray strips (portrait): borne-off is counted
   if (px >= G.barX && px < G.barX + G.bw) {
     if (G.cubeBox && py >= G.cubeBox[0] - 4 && py <= G.cubeBox[1] + 4) return { kind: 'cube' };
     return { kind: 'bar', mine: (py > G.H / 2) !== rvFlip() };
@@ -319,7 +339,7 @@ function sideSetup() {
     </div>
     <div class="small muted" style="text-align:center;white-space:nowrap">Borne off: you ${Math.max(0, 15 - c.me)} · opp ${Math.max(0, 15 - c.opp)}</div>
     <div class="row"><button onclick="clearBtn()">${isEmpty() ? 'Starting position' : 'Clear'}</button><button onclick="swapBtn()">Swap sides</button></div>
-    ${IMP ? impBanner() : `<div class="row"><button onclick="swapColour()">Swap colour</button><button onclick="swapDirection()">Swap direction</button></div>`}
+    ${IMP ? impBanner() : `<div class="row"><button class="${S.colorSwap ? 'on' : ''}" onclick="swapColour()">Swap colours</button><button class="${S.mirror ? 'on' : ''}" onclick="swapDirection()">Home board on the left</button></div>`}
     ${S.offerLast ? `<div class="row"><button id="offerLast" onclick="restoreLast()">↺ Last position analysed</button></div>` : ''}
     <div class="spacer"></div>
     ${DESKTOP ? '<div class="keys"><kbd>1</kbd>-<kbd>6</kbd> twice: dice · <kbd>C</kbd> cube decision · <kbd>Enter</kbd> analyze · <kbd>Ctrl</kbd>+<kbd>V</kbd> paste a screenshot · drop a photo on the board · results: <kbd>↑</kbd><kbd>↓</kbd> plays, <kbd>E</kbd> explain, <kbd>D</kbd> go deeper, <kbd>R</kbd> roll out, <kbd>Esc</kbd> back</div>' : ''}
@@ -405,8 +425,21 @@ function rgbWord(c) {
 }
 function swapDirection() { S.mirror = !S.mirror; saveState(); render(); toast(`Your home board is now on the ${S.mirror ? 'left' : 'right'}`); }
 // Colour names in the text sent to Claude follow the colours on screen (also inside data keys like blue_wins).
+// A play's error band (the user's rule, 2026-11-27, XG's thresholds): 'blunder' 0.080 or more, 'error' 0.020 to 0.080,
+// 'close' below, on the error as shown (rounded to 0.001).
+const errBand = (e) => { const v = +Math.max(0, e).toFixed(3); return v >= 0.08 ? 'blunder' : v >= 0.02 ? 'error' : v > 0 ? 'close' : 'best'; };
+// The shown play's arrows and landing rings by its error (BG Play's convention): green the best play (or one equal to it
+// as shown), grey a close play (under 0.020), yellow an error (0.020 to 0.080), red a blunder (0.080 or more).
+const BAND_COLOUR = { best: ['#2e9e4f', '#0e3a1c'], close: ['#a4a4a4', '#3a3a3a'], error: ['#f2c230', '#5c4500'], blunder: ['#e0413a', '#5a0f0b'] };
+function arrowColour() {
+  if (!S.preview || !S.res || S.res.kind !== 'checker' || !S.res.plays || !S.res.plays.length) return null;
+  const L = ranked(), i = L.findIndex((p) => sameB(p.b, S.preview.after)); if (i < 0) return null;
+  return BAND_COLOUR[i === 0 ? 'best' : errBand(L[i].err)];
+}
+// Costs in a cube verdict line ("(double −0.045)") in the error colours.
+const costBands = (t) => String(t || '').replace(/−(\d+\.\d{3})/g, (m, x) => `<span class="ecost ${errBand(+x)}">${m}</span>`);
 function landRing() {
-  const ac = rvArrowColour(); if (ac) return ac[0];   // the landing rings match the arrows
+  const ac = arrowColour(); if (ac) return ac[0];     // the landing rings match the arrows
   const f = S.palette && (S.colorSwap ? S.palette.light.fill : S.palette.dark.fill), c = f && hexRgb(f);
   if (!c) return 'var(--good)';
   const w = rgbWord(c); return w === 'Green' || w === 'Teal' ? '#e8871e' : 'var(--good)';
@@ -905,7 +938,7 @@ function sideResults() {
   const busyRO = r.rollout && !r.rollout.done;
   if (r.kind === 'checker') {
     const list = ranked();
-    const rows = list.map((p, i) => `<tr class="${i === S.sel ? 'sel' : ''} ${i === 0 ? 'first' : ''}" onclick="RV.follow=false;S.sel=${i};pickPreview();render()"${DESKTOP ? ` onmouseenter="hoverPlay(${i})"` : ''}><td class="n">${i + 1}</td><td class="mv">${p.name}${rvTag(p)}${p.book ? (p.book.models || []).map((m) => `<span class="mdl">${{ xg: 'XG', sage: 'Sage', gnu: 'GNU' }[m]}</span>`).join('') + (p.book.rule ? '<span class="mdl rl">Rule</span>' : '') + (p.book.tag ? `<small class="btag">${p.book.tag}</small>` : '') : ''}</td><td class="eq">${(r.book ? p.unlisted : p.lv < Math.max(...list.map((x) => x.lv))) ? `<i>${eqs(p.e)}</i>` : eqs(p.e)}</td><td class="err${i ? ' ' + rvBand(p.err) : ''}">${i ? '−' + Math.max(0, p.err).toFixed(3) : 'best'}</td><td class="d">${lvTxt(p, true)}</td></tr>`).join('');
+    const rows = list.map((p, i) => `<tr class="${i === S.sel ? 'sel' : ''} ${i === 0 ? 'first' : ''}" onclick="RV.follow=false;S.sel=${i};pickPreview();render()"${DESKTOP ? ` onmouseenter="hoverPlay(${i})"` : ''}><td class="n">${i + 1}</td><td class="mv">${p.name}${rvTag(p)}${p.book ? (p.book.models || []).map((m) => `<span class="mdl">${{ xg: 'XG', sage: 'Sage', gnu: 'GNU' }[m]}</span>`).join('') + (p.book.rule ? '<span class="mdl rl">Rule</span>' : '') + (p.book.tag ? `<small class="btag">${p.book.tag}</small>` : '') : ''}</td><td class="eq">${(r.book ? p.unlisted : p.lv < Math.max(...list.map((x) => x.lv))) ? `<i>${eqs(p.e)}</i>` : eqs(p.e)}</td><td class="err${i ? ' ' + errBand(p.err) : ''}">${i ? '−' + Math.max(0, p.err).toFixed(3) : 'best'}</td><td class="d">${lvTxt(p, true)}</td></tr>`).join('');
     const sel = list[S.sel];
     $('side').innerHTML = `${head}<div class="list"><table${DESKTOP ? ' onmouseleave="hoverPlay(-1)"' : ''}>${rows}</table>${bookNotes(r)}</div>
       ${sel && sel.probs ? probTable(sel.probs, `after #${S.sel + 1}`) : ''}
@@ -914,9 +947,9 @@ function sideResults() {
     const L = cubeLevel(); if (!L) { $('side').innerHTML = head + '<div class="small muted">Analysing…</div>'; return; }
     const v = cubeVerdict(L, S.pos.cube, S.pos.game);
     $('side').innerHTML = `${head}<div class="cubebox"><div class="verdict">${v.title}</div>
-      <table>${v.rows.map(([n, e, best]) => `<tr><td>${best ? `<b>${n}</b>` : n}</td><td class="r">${eqs(e)}</td></tr>`).join('')}</table>
-      <div class="verdict2">${rvWho(1)}: <b>${v.you}</b>${v.youCost}</div>
-      <div class="verdict2">${rvWho(2)}: <b>${v.opp}</b>${v.oppCost}</div>${rvCubePlayed(L)}</div>
+      <table>${v.rows.map(([n, e, best]) => `<tr><td>${best ? `<b class="best">${n}</b>` : n}</td><td class="r">${eqs(e)}</td></tr>`).join('')}</table>
+      <div class="verdict2">${rvWho(1)}: <b>${v.you}</b>${costBands(v.youCost)}</div>
+      <div class="verdict2">${rvWho(2)}: <b>${v.opp}</b>${costBands(v.oppCost)}</div>${rvCubePlayed(L)}</div>
       ${probTable(L.probs, 'before rolling')}
       <div class="spacer"></div>
       ${busyRO ? rolloutBar() : `<div class="row">${RV.canExplain ? `<button class="primary" style="flex:2;font-size:13.5px" ${S.pos.cube.owner === 2 ? 'disabled' : ''} onclick="openExplain()">Explain</button>` : ''}<button style="flex:1.3" ${!r.done || S.pos.cube.owner === 2 ? 'disabled' : ''} onclick="startRollout()">${r.rollout ? 'Roll out again' : 'Roll out'}</button></div>`}`;
@@ -1938,7 +1971,7 @@ function loadState() {
   if (r && r.roPreset) S.roPreset = r.roPreset;
   S.offerLast = false; applyLook(); return;
   let s = null; try { s = JSON.parse(localStorage.getItem('bgpa-state') || 'null'); } catch (e) {}
-  if (s) { if (s.game) S.game = s.game; if (s.workers) S.workers = s.workers; if (s.roPreset) S.roPreset = s.roPreset; S.colorSwap = !!s.colorSwap; S.mirror = !!s.mirror; S.impMode = s.impMode || 'fast'; S.palette = fixPalette(s.palette); }
+  if (s) { if (s.game) S.game = s.game; if (s.workers && s.workersSet) { S.workers = s.workers; S.workersSet = true; }   /* an older saved number was only the old default */ if (s.roPreset) S.roPreset = s.roPreset; S.colorSwap = !!s.colorSwap; S.mirror = !!s.mirror; S.impMode = s.impMode || 'fast'; S.palette = fixPalette(s.palette); }
   applyLook();
   const last = savedState();
   S.offerLast = !!(last && JSON.stringify(last.board) !== JSON.stringify(START) && last.board.some((v) => v));
@@ -2060,25 +2093,6 @@ function rvTabs() {
   const d = S.rvItem.dice, cv = rvCubeView();
   return `<span class="seg rvtabs"><button class="${cv ? '' : 'on'}" onclick="rvView('move')">To play ${d[0]}-${d[1]}</button><button class="${cv ? 'on' : ''}" onclick="rvView('cube')">Cube before the roll</button></span>`;
 }
-// The roll on the board, in the roller's colours: yours on the right half, Open Sage's on the left (as in the game).
-function rvDice(mid) {
-  const ds = Math.min(G.zh * 0.95, G.pw * 0.82, 40), gap = ds * 0.25, cx = S.rvItem.who === 'me' ? G.colX(9) : G.colX(3), y = mid - ds / 2;
-  const die = (x, v) => {
-    const P = { 1: [[.5, .5]], 2: [[.27, .27], [.73, .73]], 3: [[.27, .27], [.5, .5], [.73, .73]], 4: [[.27, .27], [.73, .27], [.27, .73], [.73, .73]],
-      5: [[.27, .27], [.73, .27], [.5, .5], [.27, .73], [.73, .73]], 6: [[.27, .25], [.73, .25], [.27, .5], [.73, .5], [.27, .75], [.73, .75]] }[v] || [];
-    return `<rect x="${x}" y="${y}" width="${ds}" height="${ds}" rx="${ds * 0.18}" fill="var(--me)" stroke="var(--me-edge)" stroke-width="1.4"/>` +
-      P.map(([a, c]) => `<circle cx="${x + a * ds}" cy="${y + c * ds}" r="${ds * 0.085}" fill="var(--me-ink)"/>`).join('');
-  };
-  return `<g class="rvdice">${die(cx - ds - gap / 2, S.dice[0])}${die(cx + gap / 2, S.dice[1])}</g>`;
-}
-// The arrows' colour (the user's rule, 2026-11-25) by the shown play's cost: green the best play, grey not best but under
-// 0.020, yellow an error (0.020 to 0.080), red a blunder (0.080 or more): the project's error and blunder thresholds.
-function rvArrowColour() {
-  if (!S.rvItem || !S.preview || !S.res || S.res.kind !== 'checker' || !S.res.plays.length) return null;
-  const L = ranked(), i = L.findIndex((p) => sameB(p.b, S.preview.after)); if (i < 0) return null;
-  const e = i === 0 ? 0 : Math.max(0, L[i].err);
-  return e < 0.0005 ? ['#2e9e4f', '#0e3a1c'] : e < 0.020 ? ['#a4a4a4', '#3a3a3a'] : e < 0.080 ? ['#f2c230', '#5c4500'] : ['#e0413a', '#5a0f0b'];
-}
 function rvLoad() {
   const it = rvList()[RV.idx]; if (!it) { render(); return; }
   rvShow(it);
@@ -2134,7 +2148,7 @@ function rvCubePlayed(L) {
   const g = S.pos.game, nd = L.equity_nd, dp = L.equity_dp, take = L.is_beaver ? L.equity_dt / 2 : L.equity_dt;
   const ans = { Take: take, Pass: dp }; if (g.type === 'money' && g.beaver) ans.Beaver = 2 * take;
   const doubled = Math.min(...Object.values(ans)), best = Math.max(nd, doubled), owned = S.pos.cube.owner === 1;
-  const fmt = (c) => (c < 0.0005 ? 'right' : `−${c.toFixed(3)}`), who = (side) => (side === 'me' ? 'You' : RV.bot), out = [];
+  const fmt = (c) => (c < 0.0005 ? '<span class="ecost best">right</span>' : `<span class="ecost ${errBand(c)}">−${c.toFixed(3)}</span>`), who = (side) => (side === 'me' ? 'You' : RV.bot), out = [];
   const p = cv ? { action: 'No double', by: it.who } : it.played;   // before a roll: the side rolled without doubling
   if (S.pos.cube.owner === 2 || (cv && g.type === 'match' && g.crawford)) return cv ? `<div class="verdict2 rvplayed">In the game: ${who(it.who)} rolled ${it.dice[0]}-${it.dice[1]} (no cube access)</div>` : '';
   out.push(p.action === 'Double' ? `${who(p.by)} ${owned ? 'redoubled' : 'doubled'} (${fmt(best - doubled)})` : `${who(p.by)} didn't ${owned ? 'redouble' : 'double'} (${fmt(best - nd)})`);

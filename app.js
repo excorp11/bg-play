@@ -1106,7 +1106,7 @@ const ERR_MIN = 0.020, BLUNDER_MIN = 0.080;
 // How big a decision's error was (the user's colours, 2026-11-26): red a blunder (0.080 or more), yellow an error (0.020 to
 // 0.080), grey anything smaller, the same bands as the review's arrows. Only counted decisions are errors.
 const tierOf = (c, counted) => (!counted || c == null ? 'small' : c >= BLUNDER_MIN ? 'blunder' : c >= ERR_MIN ? 'error' : 'small');
-const tierCls = (t) => ({ blunder: 'bad', error: 'yel', small: 'muted' }[t]);
+const tierCls = (t) => ({ blunder: 'bad', error: 'yel', small: 'muted', best: 'good' }[t]);
 // Your decisions' results in a small form kept with a game: {g: game, t: turn, k, c: cost, n: counted 1/0, b: best}.
 const compactDecs = (decs, g) => decs.filter((d) => d.res && !d.res.err).map((d) => ({ g, t: d.turn, k: d.k, c: +(+d.res.cost).toFixed(4), n: d.res.counted ? 1 : 0, b: String(d.res.best || '') }));
 const relCube = (c, side) => ({ value: c.value, owner: c.owner === 0 ? 0 : c.owner === side ? 1 : 2 });
@@ -1137,7 +1137,7 @@ function reviewItems(games, costs) {
   // base: the label without the cost; costTxt and tier: the cost and its band (blunder / error / small), coloured by the review
   const mark = (it, c, forced) => {
     it.err = !!(c && c.n && c.c >= ERR_MIN); it.blunder = !!(c && c.n && c.c >= BLUNDER_MIN);
-    it.costTxt = forced ? '(forced)' : c ? txt(c) : null; it.tier = c && !forced ? tierOf(c.c, !!c.n) : null;
+    it.costTxt = forced ? '(forced)' : c ? txt(c) : null; it.tier = c && !forced ? (c.c < 0.0005 ? 'best' : tierOf(c.c, !!c.n)) : null;   // the best move green (the user's rule, 2026-11-27)
     it.label = it.base + (forced ? ' (forced)' : c ? ` · ${txt(c)}` : '');
     return it;
   };
