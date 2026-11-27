@@ -129,6 +129,21 @@
     S.saved.unshift({ ...buildMat(isMatch ? 'match' : 'cash'), created: Date.now(), status: 'local', want: 'track' });
     save(); prepareBundle(); renderAll();
   }
+  // A game file Claude was given in the chat to track (Galaxy, XG): Claude writes it to progress/<id> as
+  // {pending: 1, src, at, opp, rules, games: JSON text of [{n, score: [you, them], crawford, events}]} (BG Play's own
+  // event format, converted by src/track_mat.js), and the tile scores it here like any other game. A cash game's
+  // record then takes that document's place; a match's games get <id>-g<n> and the pending document is deleted.
+  function enqueueExt(did, x) {
+    if (TARGET !== 'tile' || queued('ext:' + did)) return;
+    let list; try { list = JSON.parse(x.games); } catch (e) { return; }
+    if (!Array.isArray(list) || !list.length || !x.rules || !['cash', 'match'].includes(x.rules.type)) return;
+    const match = x.rules.type === 'match', ids = list.map((g) => (match ? `${did}-g${g.n}` : did));
+    if (ids.every((id) => tracked(id))) { if (match) dropPending(did); return; }
+    TR.q.push({ ext: true, id: 'ext:' + did, did, ids, src: String(x.src || 'file').slice(0, 20), at: Date.parse(x.at) || Date.now(), opp: String(x.opp || 'Opponent').slice(0, 40),
+      rules: match ? { type: 'match', length: +x.rules.length } : { type: 'cash', jacoby: !!x.rules.jacoby, beavers: !!x.rules.beavers }, games: x.games });
+    persist(); kick();
+  }
+  function dropPending(did) { if (TR.db) try { Promise.resolve(TR.db.doc('progress/' + did).delete()).catch(() => {}); } catch (e) { /* left for next time */ } }
   // Back-fill: every saved game (the tile's Saved games mirror its database) gets a record once.
   function scan() {
     if (TARGET !== 'tile' || !TR.loaded) return;
@@ -136,6 +151,11 @@
   }
   function expand(it) {
     if (it.file) return fileGames({ id: it.fid, src: it.src, at: it.at, mat: it.mat, ply: it.ply });
+    if (it.ext) {
+      const list = JSON.parse(it.games), match = it.rules.type === 'match';
+      const Gs = R.replayGames({ games: list.map((g) => ({ n: g.n, score: g.score, crawford: !!g.crawford, events: g.events })) }, it.rules, { botNoDoubles: true });
+      return Gs.map((G, i) => ({ id: match ? `${it.did}-g${G.n}` : it.did, src: it.src, at: it.at + i, rules: it.rules, ply: null, opp: it.opp, matchId: match ? it.did : null, G, events: list[i].events }));
+    }
     const G = R.replayGames({ games: [{ n: it.g.n, score: it.g.score, crawford: it.g.crawford, events: it.g.events }] }, it.rules, { botNoDoubles: true })[0];
     return [{ ...it, G, events: it.g.events }];
   }
@@ -159,6 +179,7 @@
         }
         TR.cur = null;
         if (stop) break;
+        if (it.ext && it.rules.type === 'match') dropPending(it.did);
         TR.q.shift(); persist();
       }
     } finally { TR.busy = false; TR.cur = null; paint(); }
@@ -263,7 +284,7 @@
     for (const k of ['you', 'them', 'youPts', 'themPts']) L[k] = r4(L[k]);
     return { v: V, id: x.id, src: x.src || 'tile', at: new Date(x.at).toISOString(), added: new Date().toISOString(), type: cash ? 'cash' : 'match', len: cash ? 0 : rules.length,
       rules: cash ? { type: 'cash', jacoby: !!rules.jacoby, beavers: !!rules.beavers } : { type: 'match', length: rules.length },
-      opp: botName(x.ply), ply: x.ply, match: cash ? null : { id: x.matchId, n: G.n, score: [G.score.me, G.score.bot], crawford: !!G.crawford },
+      opp: x.opp || botName(x.ply), ply: x.ply || null, match: cash ? null : { id: x.matchId, n: G.n, score: [G.score.me, G.score.bot], crawford: !!G.crawford },
       res: { pts, kind: res.kind || 0, how: res.how || '' }, eng: `Open Sage ${ER_PLY}-ply`,
       you: sums(mine), them: sums(theirs), luck: L, lar: cash ? r4(pts - (L.youPts - L.themPts)) : null,
       // the game itself, for its review (as a JSON string: the database takes no arrays inside arrays)
@@ -274,7 +295,7 @@
   // ------------------------------------------------------------- the database
   async function store(rec) {
     rec = JSON.parse(JSON.stringify(rec));              // plain data only (no undefined)
-    TR.docs.set(rec.id, rec);
+    TR.docs.set(rec.id, rec); if (window.BQ) BQ.refresh();
     if (TR.db) { try { await TR.db.doc('progress/' + rec.id).set(rec); TR.out = TR.out.filter((r) => r.id !== rec.id); persist(); return; } catch (e) { TR.err = 'Saving progress: ' + (e.code || e.message || e); } }
     if (!TR.out.some((r) => r.id === rec.id)) TR.out.push(rec);
     persist();
@@ -289,10 +310,13 @@
     if (!db || TR.db) return; TR.db = db;
     try {
       db.collection('progress').onSnapshot((snap) => {
-        const m = new Map(); for (const d of snap.docs) { const x = d.data(); if (x && x.v === V) m.set(d.id, x); }
+        const m = new Map(), pend = [];
+        for (const d of snap.docs) { const x = d.data(); if (x && x.v === V) m.set(d.id, x); else if (x && x.pending === 1 && typeof x.games === 'string') pend.push([d.id, x]); }
         for (const r of TR.out) m.set(r.id, r);
         TR.docs = m; TR.loaded = true; TR.dbErr = '';
+        for (const [id, x] of pend) enqueueExt(id, x);
         flush(); scan(); paint();
+        if (window.BQ) BQ.refresh();               // the Blunder Quiz takes the new blunders
       }, (err) => { TR.dbErr = String((err && (err.code || err.message)) || err); paint(); });
     } catch (e) { TR.dbErr = String(e.message || e); }
   }
@@ -519,8 +543,9 @@
     if (!ENG.weights || !ENG.pool) return toast('The engine is still loading');
     let games; try { const ev = typeof r.ev.events === 'string' ? JSON.parse(r.ev.events) : r.ev.events; games = R.replayGames({ games: [{ n: r.ev.n || 1, score: r.ev.score, crawford: r.ev.crawford, events: ev }] }, r.rules); } catch (e) { return toast('This game can\'t be reviewed: ' + (e.message || e), 4000); }
     const n = games[0].n, costs = costMap((r.decs || []).map((d) => ({ g: n, t: d.t, k: d.k, c: d.c, n: d.n, b: d.b })));
-    const items = reviewItems(games, costs); if (!items.length) return toast('Nothing to review in this game');
-    await showReview(items, `Review: ${r.type === 'cash' ? 'cash game' : `${r.len}-point match, game ${n}`}, ${when(r.at)}`);
+    const opp = r.opp && !/^OpenSage-/.test(r.opp) ? r.opp : 'Open Sage';
+    const items = reviewItems(games, costs, opp); if (!items.length) return toast('Nothing to review in this game');
+    await showReview(items, `Review: ${r.type === 'cash' ? 'cash game' : `${r.len}-point match, game ${n}`} vs ${opp}, ${when(r.at)}`, undefined, opp);
   }
   // The end-of-game panel's line about this game's progress record (tile).
   function endLine(gm) {
@@ -577,6 +602,6 @@
     setInterval(() => { if (!TR.busy && TR.q.length) kick(); if (TR.out.length) flush(); }, 15000);
     let rz = 0; window.addEventListener('resize', () => { if (!isOpen()) return; cancelAnimationFrame(rz); rz = requestAnimationFrame(hookChart); });   // turning the phone: the chart takes the new width
   }
-  window.PG = { init, setDb, kick, gameOver, enqueueFile, scan, open, close, setView, review, endLine, posType,
+  window.PG = { init, setDb, kick, gameOver, enqueueFile, scan, open, close, setView, review, endLine, posType, TYPES, KINDS, COL,
     _state: TR, _agg: agg, _series: series, _record: record, _fileGames: fileGames };
 })();

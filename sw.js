@@ -1,9 +1,9 @@
 // BG Play offline app: keeps every file the game needs on the device, so it opens and plays with no connection.
 // Cache first; a new version is fetched in the background when online and taken on the next start (or via the
 // page's "A new version is ready" button).
-const VERSION = '2026.11.27-bca5149d';
+const VERSION = '2026.11.27-a32248ed';
 const CACHE = 'bgplay-' + VERSION;
-const FILES = ["./", "index.html", "app.webmanifest", "rules.js", "progress.js", "app.js", "worker.js", "review.html", "review.js", "pa-worker.js", "engine.js", "engine.wasm", "manifest.json", "weights-bundle.wasm", "icons/icon-192.png", "icons/icon-512.png", "icons/icon-maskable-512.png"];
+const FILES = ["./", "index.html", "app.webmanifest", "rules.js", "progress.js", "quiz.js", "app.js", "worker.js", "review.html", "review.js", "pa-worker.js", "engine.js", "engine.wasm", "manifest.json", "weights-bundle.wasm", "icons/icon-192.png", "icons/icon-512.png", "icons/icon-maskable-512.png"];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES))); });
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k.startsWith('bgplay-') && k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));

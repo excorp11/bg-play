@@ -27,7 +27,8 @@ const S = { set: { ...DEF }, sess: null, match: null, game: null, saved: [], ui:
 const KEY = 'bgplay-v1';
 function save() {
   try {
-    const g = S.game ? { ...S.game, decisions: S.game.decisions.map(stripDec), takeDec: S.game.takeDec && stripDec(S.game.takeDec) } : null;
+    const G0 = window.BQ && BQ.on ? BQ.realGame() : S.game;     // the Blunder Quiz borrows the board: its game isn't kept
+    const g = G0 ? { ...G0, decisions: G0.decisions.map(stripDec), takeDec: G0.takeDec && stripDec(G0.takeDec) } : null;
     localStorage.setItem(KEY, JSON.stringify({ set: S.set, sess: S.sess, match: S.match, game: g, saved: S.saved }));
   } catch (e) { /* storage full or blocked: the game still runs */ }
 }
@@ -99,8 +100,9 @@ async function startPool() {
   const p = new Pool(S.set.workers); await p.init(ENG.weights, ENG.manifest);
   if (my !== poolGen) { p.terminate(); return; }              // a later start, or a review that opened meanwhile, wins
   ENG.pool = p; ENG.state = 'ready'; ENG.msg = '';
-  const gm = S.game;
+  const gm = window.BQ && BQ.on ? BQ.realGame() : S.game;
   if (gm) { hidden(gm, '_curDec', null); hidden(gm, '_cubePre', null); if (gm.phase !== 'over') for (const d of gm.decisions) if (!d.res) analyzeDecision(d, 'lo'); }
+  if (window.BQ && BQ.on) BQ.restarted();
   renderSide(); drive();
   if (window.PG) PG.kick();                          // progress tracking carries on in the background
 }
@@ -319,7 +321,7 @@ function addDec(d) {
 }
 function drive() {
   const gm = S.game; renderAll();
-  if (!gm || ENG.state !== 'ready' || busy) return;
+  if (!gm || gm.quiz || ENG.state !== 'ready' || busy) return;      // the quiz's positions wait for you
   const token = ++driveToken;
   if (gm.phase === 'over') { finishER(); return; }
   if (gm.phase === 'opening') return openingRoll(token);
@@ -421,6 +423,7 @@ function curMoveDec() {
   return gm._curDec.d;
 }
 function finishUserMove(t, auto) {
+  if (S.game && S.game.quiz) return window.BQ && BQ.moveDone(t);     // a quiz answer, not a game move
   const gm = S.game, before = gm.board.slice(), after = t.board.slice();
   gm.events.push({ side: 1, type: 'roll', dice: gm.dice.slice(), steps: t.steps.map((s) => [s.from, s.to]) });
   const name = R.notation(before, after, gm.dice[0], gm.dice[1]);
@@ -756,7 +759,8 @@ const doubles = (o) => o && o[0] === o[1];
 function arrowsSvg(steps, mine, colour, before) {
   if (!steps || !steps.length) return '';
   const G = GEO, conv = (p, isFrom) => (mine ? (p === 25 ? 'mybar' : p === 0 ? 'mytray' : p) : (p === 25 ? 'botbar' : p === 0 ? 'bottray' : 25 - p));
-  let t = `<defs><marker id="ah${colour.length}" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${colour}" stroke="#3a2a10" stroke-width="1"/></marker></defs>`;
+  const mk = 'ah' + colour.replace(/[^a-z0-9]/gi, '');     // a marker per colour (the quiz shows the best and your play together)
+  let t = `<defs><marker id="${mk}" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${colour}" stroke="#3a2a10" stroke-width="1"/></marker></defs>`;
   // stack heights as the steps are played, so each arrow starts and ends on a checker
   const bd = (mine ? before : before) ? before.slice() : null;
   for (const [f, to] of steps) {
@@ -771,7 +775,7 @@ function arrowsSvg(steps, mine, colour, before) {
     const bend = Math.min(40, len * 0.18), mx = (sx + ex) / 2 - (dy / len) * bend, my = (sy + ey) / 2 + (dx / len) * bend;
     const d = `M${sx},${sy} Q${mx},${my} ${ex},${ey}`;
     t += `<path d="${d}" fill="none" stroke="#3a2a10" stroke-width="5" stroke-linecap="round" opacity=".5"/>`;
-    t += `<path d="${d}" fill="none" stroke="${colour}" stroke-width="3" stroke-linecap="round" marker-end="url(#ah${colour.length})"/>`;
+    t += `<path d="${d}" fill="none" stroke="${colour}" stroke-width="3" stroke-linecap="round" marker-end="url(#${mk})"/>`;
   }
   return t;
 }
@@ -930,6 +934,7 @@ function shake(from) {
 }
 function onKey(ev) {
   if (S.ui.menu || ev.target.tagName === 'TEXTAREA' || ev.target.tagName === 'INPUT') return;
+  if (window.BQ && BQ.on) return BQ.key(ev);
   const gm = S.game; if (!gm) return;
   const k = ev.key.toLowerCase();
   if (k === ' ' || k === 'enter') { ev.preventDefault(); if (gm.phase === 'preroll' && gm.onRoll === 'me') userRoll(); else if (gm.phase === 'move') userDone(); else if (gm.phase === 'over') nextGame(); }
@@ -958,6 +963,7 @@ let sideLater = false;
 function renderSide() {
   const el = $('side'); if (!el) return;
   const z = $('pasteZone'); if (z && document.activeElement === z) { sideLater = true; return; }   // don't pull the box from under the finger
+  if (S.game && S.game.quiz && window.BQ) { el.innerHTML = BQ.side(); return; }
   const gm = S.game, v = S.ui.view;
   let h = `<div class="bar-top"><div class="title">BG Play <span class="muted">vs Open Sage ${gm ? gm.ply : S.set.ply}-ply</span></div>${gm && gm.phase !== 'over' && !S.ui.view ? autoRollSwitch(gm) : ''}${btn('⋯', 'openMenu()', 'icon', false, 'Menu')}</div>`;
   h += `<div class="score">${esc(scoreLine())}</div>`;
@@ -967,7 +973,7 @@ function renderSide() {
   if (v && v.panel) { el.innerHTML = h + v.panel; return; }
   if (!gm) {
     h += `<div class="card"><p>Play Open Sage on this device: no connection needed.</p>
-      <div class="row">${btn('New cash game', 'startCash(true)', 'primary', ENG.state !== 'ready')}${btn('New match', 'openMenu(\'match\')', '', ENG.state !== 'ready')}</div>${TARGET === 'tile' ? `<div class="row">${btn('Progress', 'PG.open()')}</div>` : ''}</div>${pasteZone()}`;
+      <div class="row">${btn('New cash game', 'startCash(true)', 'primary', ENG.state !== 'ready')}${btn('New match', 'openMenu(\'match\')', '', ENG.state !== 'ready')}</div>${TARGET === 'tile' ? `<div class="row">${btn('Progress', 'PG.open()')}${btn('Blunder Quiz', 'BQ.open()')}</div>` : ''}</div>${pasteZone()}`;
   } else h += gamePanel(gm);
   el.innerHTML = h;
 }
@@ -1140,7 +1146,7 @@ function decisionsOf(G) {
 // The review's positions: every roll that had a move (both sides), every double with its answer, and your no-doubles
 // that were errors. costs: decKey -> {c, n, b} (your decisions).
 const decKey = (g, t, k) => `${g}:${t}:${k}`;
-function reviewItems(games, costs) {
+function reviewItems(games, costs, opp = 'Open Sage') {
   const items = [], multi = games.length > 1, txt = (c) => (c.c < 0.0005 ? 'best' : `−${c.c.toFixed(3)}`);
   // base: the label without the cost; costTxt and tier: the cost and its band (blunder / error / small), coloured by the review
   const mark = (it, c, forced) => {
@@ -1156,7 +1162,7 @@ function reviewItems(games, costs) {
       const mine = P.side === 'me', c = mine ? costs[decKey(G.n, P.turn, 'M')] : null;
       items.push(mark({ id: decKey(G.n, P.turn, 'M'), who: P.side, board: P.before, dice: P.dice, cube: relCube(P.cube, P.side), game: ctxOf(G, P.side),
         played: { after: P.after, name: P.name, by: P.side }, cost: c ? c.c : null,
-        base: `${pre} · ${mine ? 'You' : 'Open Sage'} rolled ${P.dice[0]}-${P.dice[1]}: ${P.name}` }, c, P.n === 1));
+        base: `${pre} · ${mine ? 'You' : opp} rolled ${P.dice[0]}-${P.dice[1]}: ${P.name}` }, c, P.n === 1));
     } else if (P.type === 'nodouble' && P.side === 'me') {
       const c = costs[decKey(G.n, P.turn, 'R')]; if (!c || !c.n || c.c < ERR_MIN) continue;
       items.push(mark({ id: decKey(G.n, P.turn, 'R'), who: 'me', board: P.board, dice: null, cube: relCube(P.cube, 'me'), game: ctxOf(G, 'me'),
@@ -1166,7 +1172,7 @@ function reviewItems(games, costs) {
       items.push(mark({ id: decKey(G.n, P.turn, k), who: P.side, board: P.board, dice: null, cube: relCube(P.cube, P.side), game: ctxOf(G, P.side),
         played: { action: 'Double', by: P.side }, answer: { action: { take: 'Take', drop: 'Pass', beaver: 'Beaver' }[P.answer], by: other(P.side) },
         cost: c ? c.c : null,
-        base: `${pre} · ${mineD ? 'You' : 'Open Sage'} ${P.cube.owner ? 'redoubled' : 'doubled'} to ${P.value}, ${mineD ? 'Open Sage' : 'you'} ${{ take: 'took', drop: 'passed', beaver: 'beavered' }[P.answer]}` }, c, false));
+        base: `${pre} · ${mineD ? 'You' : opp} ${P.cube.owner ? 'redoubled' : 'doubled'} to ${P.value}, ${mineD ? opp : 'you'} ${{ take: 'took', drop: 'passed', beaver: 'beavered' }[P.answer]}` }, c, false));
     }
   }
   return items;
@@ -1246,7 +1252,7 @@ function rvClaude() {
   sample.limits = async () => { const f = await get(); return f && f.limits ? plain(await f.limits()) : { images: false }; };
   return { use: async (name) => (name === 'sample' && (await get()) ? sample : null) };
 }
-async function showReview(items, title, at) {
+async function showReview(items, title, at, opp) {
   // The review's script goes into the frame inline, and its engine workers are made by this page (BGP_RV.worker): a frame
   // written with document.write isn't served by the offline app's service worker, so anything it fetched itself (its
   // script, a worker, the engine a worker loads) would fail offline. Fetched from here, they come from the device.
@@ -1261,7 +1267,7 @@ async function showReview(items, title, at) {
   const pool = ENG.pool; ENG.pool = null; ENG.state = 'review'; if (pool) pool.terminate();
   window.BGP_RV = { items, title, at: at || null, target: TARGET, explain: TARGET === 'tile', claude: TARGET === 'tile' ? rvClaude() : null,
     weights: ENG.weights, manifest: ENG.manifest, book: BOOK, workers: RV_WORKERS, opts: { swapColour: !!S.set.swapColour, mirror: !!S.set.mirror },
-    botName: 'Open Sage', close: closeReview, worker: () => { const w = new Worker('pa-worker.js'); RVW.push(w); return w; } };
+    botName: opp || 'Open Sage', close: closeReview, worker: () => { const w = new Worker('pa-worker.js'); RVW.push(w); return w; } };
   const f = document.createElement('iframe'); f.id = 'rvFrame'; f.title = title; f.setAttribute('allow', 'clipboard-write');
   document.body.appendChild(f);
   const d = f.contentDocument; d.open(); d.write(html); d.close();
@@ -1318,7 +1324,7 @@ function renderMenu() {
   h += `<h4>Play</h4><div class="tograw">${tog('autoBear', 'Auto-bearoff (no contact: take off 2, or 4 on doubles)')}${tog('autoRoll', 'Roll for me when I can\'t double (Open Sage owns the cube)')}${tog('autoForced', 'Play forced moves for me')}${tog('autoDone', 'Finish the turn without Done')}</div>`;
   h += `<h4>Board</h4><div class="tograw">${tog('pips', 'Pip counts')}${tog('swapColour', 'Swap colours')}${tog('mirror', 'Home board on the left')}</div>${seg('speed', [['normal', 'Normal'], ['fast', 'Fast'], ['off', 'No animation']])}`;
   h += `<h4>Saved games</h4>${btn(`Saved games (${S.saved.length})`, 'openMenu(\'saved\')')}`;
-  if (TARGET === 'tile') h += `<h4>Progress</h4>${btn('Progress', 'PG.open()')}`;
+  if (TARGET === 'tile') h += `<h4>Progress</h4><div class="row">${btn('Progress', 'PG.open()')}${btn('Blunder Quiz', 'BQ.open()', '', !!(gm && gm.phase !== 'over' && (gm.onRoll !== 'me' || busy)))}</div>`;
   else { const nU = unsent().length; h += `<h4>Progress</h4><p class="small muted">Your progress is in the BG Play tile: every game you finish here goes there with Send to the tile${nU ? ` (${plural(nU, 'game')} waiting)` : ''}.</p>`; }
   h += `<h4>Engine</h4><div class="field">Workers ${['1', '2', '4', '6'].map((n) => btn(n, `setWorkers(${n})`, S.set.workers === +n ? 'on' : '')).join('')}</div>`;
   if (TARGET === 'tile') h += `<div class="row">${btn('Copy the opening book for the offline app', 'copyBook()')}</div>`;
@@ -1592,6 +1598,7 @@ function setupPwa() {
 function boot() {
   load();
   if (window.PG) PG.init();
+  if (window.BQ) BQ.init();
   document.body.classList.toggle('swapc', !!S.set.swapColour);
   if (S.game && S.game.phase !== 'over') {      // resume: results from before the 4-ply ER are redone when the engine starts
     for (const d of S.game.decisions) if (d.res && d.res.ply !== ER_PLY) delete d.res;
@@ -1611,11 +1618,12 @@ function boot() {
     if (t && /BGPLAY-(GAMES|BOOK) /.test(t)) { ev.preventDefault(); importText(t); }
     else if (box && t) { ev.preventDefault(); pasteMsg(notOurs()); }
   });
-  const route = () => { if (TARGET === 'tile' && location.hash === '#paste' && S.ui.menu !== 'paste') openPaste('games'); };
+  // #paste: the paste screen (from the offline app); #quiz: straight into the Blunder Quiz
+  const route = () => { if (TARGET === 'tile' && location.hash === '#paste' && S.ui.menu !== 'paste') openPaste('games'); else if (TARGET === 'tile' && location.hash === '#quiz' && window.BQ && !BQ.on) BQ.open(); };
   window.addEventListener('hashchange', route); route();
   if (TARGET === 'pwa' && unsent().length) prepareBundle();
   if (TARGET === 'tile' && window.claude && typeof window.claude.use === 'function') {
-    window.claude.use('db').then((x) => { CAP.db = x; if (x) { flushQueue(); watchReviews(); if (window.PG) PG.setDb(x); } }).catch(() => {});
+    window.claude.use('db').then((x) => { CAP.db = x; if (x) { flushQueue(); watchReviews(); if (window.PG) PG.setDb(x); if (window.BQ) BQ.setDb(x); } }).catch(() => {});
     window.claude.use('mcp').then((x) => { CAP.mcp = x; }).catch(() => {});
     window.claude.use('downloads').then((x) => { CAP.dl = x; }).catch(() => {});
   }
