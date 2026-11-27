@@ -40,7 +40,8 @@
     ['wrong-beaver', 'Wrong beaver'], ['missed-beaver', 'Missed beaver']];
   const r3 = (x) => Math.round(x * 1000) / 1000, r4 = (x) => Math.round(x * 10000) / 10000;
   const bandOf = (c) => { const v = r3(Math.max(0, c)); return v >= 0.08 ? 'blunder' : v >= 0.02 ? 'error' : v > 0 ? 'close' : 'best'; };
-  const TR = { q: [], out: [], docs: new Map(), db: null, loaded: false, busy: false, cur: null, err: '', dbErr: '', view: { type: 'all', len: 0 }, hover: -1 };
+  const TR = { q: [], out: [], docs: new Map(), db: null, loaded: false, busy: false, cur: null, err: '', dbErr: '', view: { type: 'all', len: 0, metric: 'pr', vals: false }, hover: -1 };
+  try { TR.view.metric = localStorage.getItem('bgplay-pgmetric') || 'pr'; } catch (e) { /* the default */ }
 
   // ------------------------------------------------------------- position types
   // b: one side's view (positive = that side's checkers, [25] its bar, [0] the other side's bar).
@@ -108,9 +109,10 @@
   }
   // The game that just ended in the tile (called by app.js once its ER is done). Your decisions' results come along,
   // so they aren't worked out twice. The offline app keeps the game to send to the tile instead.
-  function gameOver(gm) {
-    if (TARGET === 'pwa') return keepForTile(gm);
-    const isMatch = gm.rules.type === 'match', M = S.match;
+  function gameOver(gm, M0) {
+    const M = M0 || S.match;                         // the game's own match (a new one may have started since)
+    if (TARGET === 'pwa') return keepForTile(gm, M);
+    const isMatch = gm.rules.type === 'match';
     if (isMatch && !M) return;
     const id = isMatch ? `${M.id}-g${gm.n}` : gm.id;
     if (tracked(id) || queued(id)) return;
@@ -121,12 +123,16 @@
   }
   // Offline app: every finished game (a match once it ends) is kept to go to the tile with Send to the tile, for
   // progress; Save for full analysis marks it for review as well.
-  function keepForTile(gm) {
+  function keepForTile(gm, M) {
     const isMatch = gm.rules.type === 'match';
-    if (isMatch && !(S.match && S.match.over)) return;
-    const id = isMatch ? S.match.id : gm.id;
-    if (S.saved.find((x) => x.id === id)) return;
-    S.saved.unshift({ ...buildMat(isMatch ? 'match' : 'cash'), created: Date.now(), status: 'local', want: 'track' });
+    if (isMatch && !(M && M.over)) return;
+    keep(isMatch ? buildMat('match', gm, M) : buildMat('cash', gm, M));
+  }
+  // A match left unfinished (a new cash game or match started): the games played in it, for your progress.
+  function keepMatch(M) { if (TARGET === 'pwa' && M && M.games.length) keep(buildMat('match', null, M)); }
+  function keep(e) {
+    if (S.saved.find((x) => x.id === e.id)) return;
+    S.saved.unshift({ ...e, created: Date.now(), status: 'local', want: 'track' });
     save(); prepareBundle(); renderAll();
   }
   // A game file Claude was given in the chat to track (Galaxy, XG): Claude writes it to progress/<id> as
@@ -345,15 +351,63 @@
     const xs = list.map((d) => Math.max(0, d.c) * 500), m = xs.reduce((a, b) => a + b, 0) / xs.length;
     return Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / (xs.length - 1));
   }
-  function series(recs, sd) {
-    const win = [], out = []; let sum = 0;
+  // The figures the trend chart can draw: each headline figure (the user's request, 2026-11-27). Each one per game,
+  // over a rolling window of its own decisions with its 95% range, and over all games so far. Cube and critical
+  // decisions are rarer than the rest, so their window is 100. xg: XG's rating bands are shaded (they rate a PR over
+  // all decisions, so not the checker-only or cube-only one).
+  const isBand = (b) => (d) => bandOf(d.c) === b, every = () => true;
+  const METRICS = [
+    { k: 'pr', name: 'PR', chip: 'PR', unit: 'pr', win: WIN_N, one: 'decision', pick: every, xg: true },
+    { k: 'prM', name: 'Checker play PR', chip: 'Checker PR', unit: 'pr', win: WIN_N, one: 'checker play', pick: (d) => d.k === 'M' },
+    { k: 'prC', name: 'Cube PR', chip: 'Cube PR', unit: 'pr', win: 100, one: 'cube decision', pick: (d) => d.k !== 'M' },
+    { k: 'best', name: 'Best moves', chip: 'Best moves', unit: 'pct', win: WIN_N, one: 'decision', pick: every, hit: isBand('best') },
+    { k: 'crit', name: 'Critical decisions: best found', chip: 'Critical best', unit: 'pct', win: 100, one: 'critical decision', pick: (d) => d.g != null && r3(d.g) >= CRIT, hit: isBand('best') },
+    { k: 'err', name: 'Errors per 100 decisions', chip: 'Errors /100', unit: 'per', win: WIN_N, one: 'decision', pick: every, hit: isBand('error') },
+    { k: 'blu', name: 'Blunders per 100 decisions', chip: 'Blunders /100', unit: 'per', win: WIN_N, one: 'decision', pick: every, hit: isBand('blunder') },
+    { k: 'opp', name: 'Opponent PR', chip: 'Opponent PR', unit: 'pr', win: WIN_N, one: 'decision', opp: true, xg: true },
+  ];
+  const metricOf = (k) => METRICS.find((m) => m.k === k) || METRICS[0];
+  const fmtOf = (m) => (m.unit === 'pr' ? f2 : m.unit === 'pct' ? (x) => (x == null || !Number.isFinite(x) ? '–' : `${Math.round(x)}%`) : f1);
+  // The 95% range of a share: Wilson's interval (it stays within 0-100% and still works at none or all).
+  function wilson(h, n) {
+    const p = h / n, z2 = Z95 * Z95, d = 1 + z2 / n, c = (p + z2 / (2 * n)) / d, w = (Z95 * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n))) / d;
+    return [Math.max(0, c - w), Math.min(1, c + w)];
+  }
+  // One point per game: g this game (gn decisions of the kind, gh of them hits), roll over the window (rn decisions,
+  // lo-hi its 95% range), cum over all so far (cn). PR in PR units; shares and rates per 100.
+  function seriesOf(m, recs) {
+    const out = [];
+    if (m.opp) {      // only the opponent's game totals are kept: whole games make the window, and there's no range
+      const win = []; let n = 0, lost = 0, cn = 0, cl = 0;
+      recs.forEach((r, i) => {
+        const t = r.them && r.them.n ? r.them : null;
+        if (t) { win.push(t); n += t.n; lost += t.lost; cn += t.n; cl += t.lost; while (win.length > 1 && n - win[0].n >= m.win) { const o = win.shift(); n -= o.n; lost -= o.lost; } }
+        out.push({ i, r, g: t ? (t.lost * 500) / t.n : null, gn: t ? t.n : 0, roll: n ? (lost * 500) / n : null, rn: n, lo: null, hi: null, cum: cn ? (cl * 500) / cn : null, cn });
+      });
+      return out;
+    }
+    const sd = m.hit ? 0 : sdOf(counted(recs).filter(m.pick)), sc = m.hit ? 100 : 500;
+    const win = []; let sum = 0, cn = 0, cs = 0;
     recs.forEach((r, i) => {
-      const ds = (r.decs || []).filter((d) => d.n);
-      for (const d of ds) { const c = Math.max(0, d.c); win.push(c); sum += c; if (win.length > WIN_N) sum -= win.shift(); }
-      const n = win.length, roll = n ? (sum * 500) / n : null;
-      out.push({ i, r, pr: r.you && r.you.n ? (r.you.lost * 500) / r.you.n : null, gn: r.you ? r.you.n : 0, roll, rn: n, ci: n ? (Z95 * sd) / Math.sqrt(n) : null });
+      const ds = (r.decs || []).filter((d) => d.n && m.pick(d)); let gs = 0;
+      for (const d of ds) { const v = m.hit ? (m.hit(d) ? 1 : 0) : Math.max(0, d.c); gs += v; cs += v; cn++; win.push(v); sum += v; if (win.length > m.win) sum -= win.shift(); }
+      const n = win.length, p = n ? sum / n : null; let lo = null, hi = null;
+      if (n) {
+        if (m.hit) { const w = wilson(Math.round(sum), n); lo = w[0] * sc; hi = w[1] * sc; }
+        else { const ci = (Z95 * sd) / Math.sqrt(n); lo = Math.max(0, p * sc - ci); hi = p * sc + ci; }
+      }
+      out.push({ i, r, g: ds.length ? (gs / ds.length) * sc : null, gn: ds.length, gh: m.hit ? gs : null, roll: p == null ? null : p * sc, rn: n, lo, hi, cum: cn ? (cs / cn) * sc : null, cn });
     });
     return out;
+  }
+  const rangeText = (m, p) => (m.opp || p.roll == null ? '' : m.unit === 'pr' ? `± ${f1(p.hi - p.roll)}` : `(95%: ${fmtOf(m)(p.lo)}–${fmtOf(m)(p.hi)})`);
+  const oppName = (o) => { const m = /^OpenSage-(\d)ply$/.exec(o || ''); return m ? `Open Sage ${m[1]}-ply` : o || ''; };
+  const gameName = (r, long) => (r.type === 'cash' ? (long ? 'cash game' : 'Cash') : long ? `${r.len}-point match, game ${r.match ? r.match.n : ''}` : `${r.len}-pt, game ${r.match ? r.match.n : ''}`);
+  // Chooses the chart's figure: from a headline figure (scrolls to the chart) or the chips over it.
+  function metric(k, fromTile) {
+    TR.view.metric = metricOf(k).k; TR.hover = -1; try { localStorage.setItem('bgplay-pgmetric', TR.view.metric); } catch (e) { /* only for now */ }
+    paint();
+    if (fromTile) { const h2 = $('pgChartH'); if (h2) h2.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); }
   }
 
   // ------------------------------------------------------------- the Progress tab
@@ -388,6 +442,7 @@
   const isOpen = () => { const ov = $('progOv'); return !!(ov && ov.classList.contains('open')); };
   // Redraws the tab when it's open (keeping its scroll), else the end-of-game panel's progress line.
   function paint() {
+    if (S.ui.menu === 'imported' && typeof renderMenu === 'function') renderMenu();     // a paste's summary: games added
     if (!isOpen()) { if (typeof renderSide === 'function' && S.game && S.game.phase === 'over') renderSide(); return; }
     const ov = $('progOv'), body = ov.querySelector('.pgbody'), top = body ? body.scrollTop : 0;
     ov.innerHTML = page();
@@ -406,22 +461,44 @@
       h += `<div class="card"><p>${all().length ? 'No games in this selection yet.' : 'No games tracked yet. Every game you finish in BG Play is added here: your PR, the plays you found, the cube, the luck.'}</p></div>`;
       return h + '</div></div>';
     }
-    const list = counted(recs), A = agg(list), sd = sdOf(list), S2 = series(recs, sd), last = S2[S2.length - 1];
-    // headline figures
+    const list = counted(recs), A = agg(list), m = metricOf(v.metric), P = seriesOf(METRICS[0], recs), last = P[P.length - 1];
+    const lastCi = last.roll == null ? null : last.hi - last.roll;
+    // headline figures: each one is drawn over time below when tapped
     const them = recs.reduce((a, r) => { a.n += (r.them && r.them.n) || 0; a.lost += (r.them && r.them.lost) || 0; return a; }, { n: 0, lost: 0 });
+    const tile = (k, cls, lab, val, sub) => `<button class="tile${cls ? ' ' + cls : ''}${m.k === k ? ' sel' : ''}" aria-pressed="${m.k === k}" onclick="PG.metric('${k}', 1)"><span class="lab">${lab}</span><span class="val">${val}</span><span class="sub">${sub}</span></button>`;
     h += '<div class="tiles">';
-    h += `<div class="tile hero"><div class="lab">PR, last ${Math.min(WIN_N, last.rn)} decisions</div><div class="val">${f2(last.roll)}</div><div class="sub">± ${f1(last.ci)} (95%) · ${esc(rating(last.roll))}</div></div>`;
-    h += `<div class="tile"><div class="lab">PR, all ${plural(A.n, 'decision')}</div><div class="val">${f2(A.pr)}</div><div class="sub">${plural(recs.length, 'game')} · ${esc(rating(A.pr))}</div></div>`;
-    h += `<div class="tile"><div class="lab">Checker play PR</div><div class="val">${f2(A.prM)}</div><div class="sub">${plural(A.nM, 'checker play')}</div></div>`;
-    h += `<div class="tile"><div class="lab">Cube PR</div><div class="val">${f2(A.prC)}</div><div class="sub">${plural(A.nC, 'cube decision')}</div></div>`;
-    h += `<div class="tile"><div class="lab">Best moves</div><div class="val">${pc(A.band.best, A.n)}</div><div class="sub">critical: ${pc(A.critBest, A.crit)} of ${A.crit}</div></div>`;
-    h += `<div class="tile"><div class="lab">Errors / blunders per 100</div><div class="val">${per100(A.band.error, A.n)} / ${per100(A.band.blunder, A.n)}</div><div class="sub">0.020+ / 0.080+</div></div>`;
-    h += `<div class="tile"><div class="lab">Opponent PR</div><div class="val">${f2(them.n ? (them.lost * 500) / them.n : null)}</div><div class="sub">${plural(them.n, 'decision')}</div></div>`;
+    h += tile('pr', 'hero', `PR, last ${Math.min(WIN_N, last.rn)} decisions`, f2(last.roll), `± ${f1(lastCi)} (95%) · ${esc(rating(last.roll))}`);
+    h += tile('pr', '', `PR, all ${plural(A.n, 'decision')}`, f2(A.pr), `${plural(recs.length, 'game')} · ${esc(rating(A.pr))}`);
+    h += tile('prM', '', 'Checker play PR', f2(A.prM), plural(A.nM, 'checker play'));
+    h += tile('prC', '', 'Cube PR', f2(A.prC), plural(A.nC, 'cube decision'));
+    h += tile('best', '', 'Best moves', pc(A.band.best, A.n), `of ${plural(A.n, 'decision')}`);
+    h += tile('crit', '', 'Critical: best found', pc(A.critBest, A.crit), plural(A.crit, 'critical decision'));
+    h += tile('err', '', 'Errors per 100', per100(A.band.error, A.n), '0.020 to 0.080');
+    h += tile('blu', '', 'Blunders per 100', per100(A.band.blunder, A.n), '0.080 or more');
+    h += tile('opp', '', 'Opponent PR', f2(them.n ? (them.lost * 500) / them.n : null), plural(them.n, 'decision'));
     h += '</div>';
-    // PR over time
-    h += `<h2>PR over time</h2><div class="legend"><span><svg class="key" width="12" height="12"><circle cx="6" cy="6" r="4" fill="var(--muted)"/></svg>Each game</span><span><svg class="key" width="18" height="12"><line x1="1" y1="6" x2="17" y2="6" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/></svg>Last 500 decisions</span><span><svg class="key" width="14" height="12"><rect x="1" y="2" width="12" height="8" rx="2" fill="var(--accent)" opacity=".16"/></svg>95% range</span><span class="muted">Shading: XG's rating bands</span></div>`;
-    h += `<div class="chart" id="pgChart" tabindex="0" aria-label="PR over time: each game and the last 500 decisions. The games table below has every value."></div>`;
-    h += `<p class="muted small">PR = equity lost × 500 / decisions, counted as XG counts them (forced and obvious decisions left out), from Open Sage at ${ER_PLY}-ply with the XG book for turns 1-2. The 95% range uses the spread of your own errors (${f1(sd)} per decision).</p>`;
+    // the chosen figure over time, with its values as a table
+    const S2 = seriesOf(m, recs), fmt = fmtOf(m), many = `${m.one}s`;
+    const lineName = m.opp ? `Last ${WIN_N} or so decisions (whole games)` : `Last ${m.win} ${many}`;
+    h += `<h2 id="pgChartH">${esc(m.name)} over time</h2>`;
+    h += `<div class="mchips" role="group" aria-label="The figure to chart">${METRICS.map((x) => `<button class="${x.k === m.k ? 'on' : ''}" aria-pressed="${x.k === m.k}" onclick="PG.metric('${x.k}')">${esc(x.chip)}</button>`).join('')}</div>`;
+    h += `<div class="legend"><span><svg class="key" width="12" height="12"><circle cx="6" cy="6" r="4" fill="var(--muted)"/></svg>Each game</span><span><svg class="key" width="18" height="12"><line x1="1" y1="6" x2="17" y2="6" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/></svg>${esc(lineName)}</span>${m.opp ? '' : '<span><svg class="key" width="14" height="12"><rect x="1" y="2" width="12" height="8" rx="2" fill="var(--accent)" opacity=".16"/></svg>95% range</span>'}<span><svg class="key" width="20" height="12"><line x1="1" y1="6" x2="19" y2="6" stroke="var(--ink)" stroke-opacity=".6" stroke-width="1.5" stroke-dasharray="5 3"/></svg>All so far</span>${m.xg ? '<span class="muted">Shading: XG\'s rating bands</span>' : ''}</div>`;
+    h += `<div class="chart" id="pgChart" tabindex="0" aria-label="${esc(m.name)} over time: each game, the ${esc(lineName.toLowerCase())} and all games so far. The chart's values are in the table under it."></div>`;
+    h += `<details class="vals"${v.vals ? ' open' : ''} ontoggle="PG.vals(this.open)"><summary>The chart's values</summary><div class="tscroll"><table class="pt"><tr><th>Date</th><th>Game</th><th>This game</th><th class="w">${esc(many[0].toUpperCase() + many.slice(1))}</th><th>${esc(m.opp ? 'Last ~500' : `Last ${m.win}`)}</th><th class="w">95% range</th><th>All so far</th></tr>`;
+    for (const p of S2.slice().reverse()) h += `<tr><td>${esc(day(p.r.at))}<span class="w"> ${esc(when(p.r.at).split(' ').pop())}</span></td><td>${esc(gameName(p.r))}</td><td>${fmt(p.g)}</td><td class="w">${m.hit && p.gn ? `${p.gh} of ${p.gn}` : p.gn}</td><td>${fmt(p.roll)}</td><td class="w">${esc(rangeText(m, p).replace(/^\(95%: |\)$/g, '')) || '–'}</td><td>${fmt(p.cum)}</td></tr>`;
+    h += '</table></div></details>';
+    const sdM = m.hit || m.opp ? 0 : sdOf(list.filter(m.pick));
+    const notes = {
+      pr: `PR = equity lost × 500 / decisions, counted as XG counts them (forced and obvious decisions left out), from Open Sage at ${ER_PLY}-ply with the XG book for turns 1-2. The 95% range uses the spread of your own errors (${f1(sdM)} per decision).`,
+      prM: `Checker play PR: PR over your checker plays alone (XG's level). The 95% range uses the spread of your checker-play errors (${f1(sdM)} per play). XG's rating bands rate a PR over all decisions, so they aren't shaded here.`,
+      prC: `Cube PR: PR over your counted cube decisions alone (XG's level); they're rarer, so the line takes your last 100. The 95% range uses the spread of your cube errors (${f1(sdM)} per decision). No rating bands: XG's rate a PR over all decisions.`,
+      best: 'Best moves: the share of your counted decisions where you chose the engine\'s best (or shown as 0.000). The 95% range is Wilson\'s interval for a share.',
+      crit: 'Critical decisions: those where the second-best choice cost 0.020 or more, so only the best avoided an error; the line takes your last 100. The 95% range is Wilson\'s interval for a share.',
+      err: 'Errors: decisions that cost 0.020 to 0.080, per 100 counted decisions. The 95% range is Wilson\'s interval for a share.',
+      blu: 'Blunders: decisions that cost 0.080 or more, per 100 counted decisions. The 95% range is Wilson\'s interval for a share.',
+      opp: 'Opponent PR: your opponent\'s decisions, counted and scored the same way. Only each game\'s totals are kept for the opponent, so the line takes whole games (about 500 decisions) and has no 95% range.',
+    };
+    h += `<p class="muted small">${notes[m.k]}</p>`;
     // monthly
     const months = new Map(); for (const r of recs) { const k = r.at.slice(0, 7); if (!months.has(k)) months.set(k, []); months.get(k).push(r); }
     h += `<h2>By month</h2><div class="tscroll"><table class="pt"><tr><th>Month</th><th class="w">Games</th><th class="w">Decisions</th><th>PR</th><th>Checker</th><th>Cube</th><th>Errors /100</th><th>Blunders /100</th><th>Best</th></tr>`;
@@ -475,39 +552,57 @@
     for (const s of S2.slice().reverse()) {
       const r = s.r, L = r.luck || {}, net = (L.youPts || 0) - (L.themPts || 0);
       const game = r.type === 'cash' ? 'Cash' : `${r.len}-pt, game ${r.match ? r.match.n : ''}`;
-      h += `<tr><td>${esc(day(r.at))}<span class="w"> ${esc(when(r.at).split(' ').pop())}</span></td><td class="w">${esc(r.opp || '')}</td><td>${esc(game)}</td><td>${sgn(r.res ? r.res.pts : 0, 0)}</td><td>${f2(s.pr)}</td><td class="w">${f2(s.roll)}</td><td class="w">${f2(r.them && r.them.n ? (r.them.lost * 500) / r.them.n : null)}</td><td class="w">${sgn(net, 2)}</td><td class="w">${s.gn}</td><td>${btn('Review', `PG.review(${esc(JSON.stringify(r.id))})`, 'small')}</td></tr>`;
+      h += `<tr><td>${esc(day(r.at))}<span class="w"> ${esc(when(r.at).split(' ').pop())}</span></td><td class="w">${esc(oppName(r.opp))}</td><td>${esc(game)}</td><td>${sgn(r.res ? r.res.pts : 0, 0)}</td><td>${f2(s.pr)}</td><td class="w">${f2(s.roll)}</td><td class="w">${f2(r.them && r.them.n ? (r.them.lost * 500) / r.them.n : null)}</td><td class="w">${sgn(net, 2)}</td><td class="w">${s.gn}</td><td>${btn('Review', `PG.review(${esc(JSON.stringify(r.id))})`, 'small')}</td></tr>`;
     }
     h += `</table></div><p class="muted small">Luck: your net luck in the game, in points (your luck minus your opponent's, at each roll's cube). Turn the phone sideways for every column.</p>`;
     return h + '</div></div>';
   }
-  // The PR chart: a dot per game, the last 500 decisions as a line with its 95% range, XG's bands shaded behind.
+  // The trend chart of the chosen figure: a dot per game, the rolling window as a line with its 95% range, all games
+  // so far dashed, and for PR XG's rating bands shaded behind. Crosshair and tooltip; arrow keys step through games.
   function hookChart() {
     const el = $('pgChart'); if (!el) return;
-    const recs = filtered(), list = counted(recs), S2 = series(recs, sdOf(list));
+    const m = metricOf(TR.view.metric), recs = filtered(), S2 = seriesOf(m, recs), fmt = fmtOf(m);
+    if (!S2.some((p) => p.g != null || p.roll != null)) { el.innerHTML = `<p class="muted small" style="margin:8px">No counted ${esc(m.one)}s in this selection yet.</p>`; el.onkeydown = el.onfocus = el.onblur = null; return; }
     const W = Math.max(280, el.clientWidth - 12), H = Math.max(190, Math.min(300, Math.round(W * 0.42)));
-    const ml = 34, mr = 82, mt = 10, mb = 24, pw = W - ml - mr, ph = H - mt - mb;
-    const vals = S2.flatMap((s) => [s.pr, s.roll != null ? s.roll + s.ci : null]).filter((x) => x != null).sort((a, b) => a - b);
-    const want = Math.max(7.5, vals.length ? vals[Math.floor(0.9 * (vals.length - 1))] : 7.5);
-    const top = [7.5, 12.5, 17.5, 22.5, 30, 40, 60].find((t) => t >= want) || 60;
-    const x = (i) => ml + (S2.length === 1 ? pw / 2 : (i / (S2.length - 1)) * pw), y = (v) => mt + ph - (Math.min(Math.max(v, 0), top) / top) * ph;
-    let s = '';
-    RATINGS.forEach(([a, b, name], i) => {
-      if (a >= top) return; const b2 = Math.min(b, top);
-      if (i % 2) s += `<rect x="${ml}" y="${y(b2)}" width="${pw}" height="${y(a) - y(b2)}" fill="var(--pgband)"/>`;
-      s += `<text x="${ml + pw + 6}" y="${(y(a) + y(b2)) / 2 + 3.5}" font-size="10.5" fill="var(--muted)">${esc(name)}</text>`;
-      s += `<line x1="${ml}" x2="${ml + pw}" y1="${y(a)}" y2="${y(a)}" stroke="var(--line)" stroke-width="1"/><text x="${ml - 5}" y="${y(a) + 3.5}" font-size="10.5" text-anchor="end" fill="var(--muted)">${a}</text>`;
-    });
-    s += `<text x="${ml - 5}" y="${y(top) + 3.5}" font-size="10.5" text-anchor="end" fill="var(--muted)">${top}</text>`;
-    const R2 = S2.filter((p) => p.roll != null);
-    if (R2.length) {
-      const up = R2.map((p) => `${x(p.i)},${y(p.roll + p.ci)}`), dn = R2.slice().reverse().map((p) => `${x(p.i)},${y(Math.max(0, p.roll - p.ci))}`);
-      s += `<polygon points="${up.concat(dn).join(' ')}" fill="var(--accent)" opacity=".14"/>`;
-      s += R2.length > 1 ? `<polyline points="${R2.map((p) => `${x(p.i)},${y(p.roll)}`).join(' ')}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` : `<circle cx="${x(R2[0].i)}" cy="${y(R2[0].roll)}" r="3" fill="var(--accent)"/>`;
+    const ml = 34, mr = m.xg ? 82 : 14, mt = 10, mb = 24, pw = W - ml - mr, ph = H - mt - mb;
+    const qt = (xs, f) => { const a = xs.filter((z) => z != null && Number.isFinite(z)).sort((p, q) => p - q); return a.length ? a[Math.floor(f * (a.length - 1))] : null; };
+    // the scale: PR and rates from 0 to a round top over 90% of what's drawn; shares up to 100% from a round floor
+    let bot = 0, top, ticks = [];
+    if (m.unit === 'pct') {
+      top = 100; const low = qt(S2.flatMap((p) => [p.g, p.lo]), 0.1);
+      bot = Math.max(0, Math.min(60, Math.floor(((low == null ? 0 : low) - 2) / 10) * 10));
+      let step = 10; if (top - bot > 50) { step = 20; bot = Math.floor(bot / 20) * 20; }
+      for (let t = bot; t <= top; t += step) ticks.push(t);
+    } else {
+      const want = qt(S2.flatMap((p) => [p.g, p.hi != null ? p.hi : p.roll]), 0.9) || 0;
+      const ladder = m.xg ? [7.5, 12.5, 17.5, 22.5, 30, 40, 60] : m.unit === 'per' ? [2, 5, 10, 15, 20, 30, 40, 60, 100] : [5, 10, 15, 20, 30, 40, 60];
+      top = ladder.find((t) => t >= want) || ladder[ladder.length - 1];
+      if (!m.xg) { const step = top <= 2 ? 0.5 : top <= 5 ? 1 : top <= 10 ? 2 : top <= 20 ? 5 : top <= 40 ? 10 : 20; for (let t = 0; t <= top + 1e-9; t += step) ticks.push(Math.round(t * 10) / 10); }
     }
-    for (const p of S2) if (p.pr != null) {
-      const over = p.pr > top, cy = y(p.pr);
-      s += over ? `<path d="M${x(p.i) - 4},${cy + 6} L${x(p.i) + 4},${cy + 6} L${x(p.i)},${cy} z" fill="var(--muted)" stroke="var(--panel)" stroke-width="1.5"/>`
-        : `<circle cx="${x(p.i)}" cy="${cy}" r="4" fill="var(--muted)" stroke="var(--panel)" stroke-width="2"/>`;
+    const x = (i) => ml + (S2.length === 1 ? pw / 2 : (i / (S2.length - 1)) * pw), y = (v) => mt + ph - ((Math.min(Math.max(v, bot), top) - bot) / (top - bot)) * ph;
+    const lab = (t) => (m.unit === 'pct' ? `${t}%` : String(t));
+    let s = '';
+    if (m.xg) {
+      RATINGS.forEach(([a, b, name], i) => {
+        if (a >= top) return; const b2 = Math.min(b, top);
+        if (i % 2) s += `<rect x="${ml}" y="${y(b2)}" width="${pw}" height="${y(a) - y(b2)}" fill="var(--pgband)"/>`;
+        s += `<text x="${ml + pw + 6}" y="${(y(a) + y(b2)) / 2 + 3.5}" font-size="10.5" fill="var(--muted)">${esc(name)}</text>`;
+        s += `<line x1="${ml}" x2="${ml + pw}" y1="${y(a)}" y2="${y(a)}" stroke="var(--line)" stroke-width="1"/><text x="${ml - 5}" y="${y(a) + 3.5}" font-size="10.5" text-anchor="end" fill="var(--muted)">${a}</text>`;
+      });
+      s += `<text x="${ml - 5}" y="${y(top) + 3.5}" font-size="10.5" text-anchor="end" fill="var(--muted)">${top}</text>`;
+    } else for (const t of ticks) s += `<line x1="${ml}" x2="${ml + pw}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line)" stroke-width="1"/><text x="${ml - 5}" y="${y(t) + 3.5}" font-size="10.5" text-anchor="end" fill="var(--muted)">${lab(t)}</text>`;
+    const R2 = S2.filter((p) => p.roll != null), C2 = S2.filter((p) => p.cum != null);
+    if (R2.length && !m.opp) {
+      const up = R2.map((p) => `${x(p.i)},${y(p.hi)}`), dn = R2.slice().reverse().map((p) => `${x(p.i)},${y(p.lo)}`);
+      s += `<polygon points="${up.concat(dn).join(' ')}" fill="var(--accent)" opacity=".14"/>`;
+    }
+    if (C2.length > 1) s += `<polyline points="${C2.map((p) => `${x(p.i)},${y(p.cum)}`).join(' ')}" fill="none" stroke="var(--ink)" stroke-opacity=".6" stroke-width="1.5" stroke-dasharray="5 4" stroke-linejoin="round" stroke-linecap="round"/>`;
+    if (R2.length) s += R2.length > 1 ? `<polyline points="${R2.map((p) => `${x(p.i)},${y(p.roll)}`).join(' ')}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` : `<circle cx="${x(R2[0].i)}" cy="${y(R2[0].roll)}" r="3" fill="var(--accent)"/>`;
+    for (const p of S2) if (p.g != null) {     // off the scale: a triangle at the edge, pointing the way it went
+      const X = x(p.i);
+      if (p.g > top) s += `<path d="M${X - 4},${y(top) + 6} L${X + 4},${y(top) + 6} L${X},${y(top)} z" fill="var(--muted)" stroke="var(--panel)" stroke-width="1.5"/>`;
+      else if (p.g < bot) s += `<path d="M${X - 4},${y(bot) - 6} L${X + 4},${y(bot) - 6} L${X},${y(bot)} z" fill="var(--muted)" stroke="var(--panel)" stroke-width="1.5"/>`;
+      else s += `<circle cx="${X}" cy="${y(p.g)}" r="4" fill="var(--muted)" stroke="var(--panel)" stroke-width="2"/>`;
     }
     // dates along the bottom: up to 5, evenly spread
     const nL = Math.min(5, S2.length), idx = [...new Set(Array.from({ length: nL }, (_, k) => Math.round((k * (S2.length - 1)) / Math.max(1, nL - 1))))];
@@ -515,12 +610,16 @@
     s += `<g id="pgHov"></g><rect id="pgHit" x="${ml}" y="${mt}" width="${pw}" height="${ph}" fill="transparent"/>`;
     el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-hidden="true">${s}</svg><div class="tip" id="pgTip"></div>`;
     const svg = el.querySelector('svg'), hov = el.querySelector('#pgHov'), tip = el.querySelector('#pgTip');
+    const inR = (v) => v != null && v >= bot && v <= top;
     const show = (i) => {
       TR.hover = i; if (i < 0 || !S2[i]) { hov.innerHTML = ''; tip.style.display = 'none'; return; }
       const p = S2[i], r = p.r, X = x(i);
-      hov.innerHTML = `<line x1="${X}" x2="${X}" y1="${mt}" y2="${mt + ph}" stroke="var(--muted)" stroke-width="1"/>${p.roll != null ? `<circle cx="${X}" cy="${y(p.roll)}" r="4.5" fill="var(--accent)" stroke="var(--panel)" stroke-width="2"/>` : ''}${p.pr != null && p.pr <= top ? `<circle cx="${X}" cy="${y(p.pr)}" r="5.5" fill="var(--ink)" stroke="var(--panel)" stroke-width="2"/>` : ''}`;
-      const game = r.type === 'cash' ? 'cash game' : `${r.len}-point match, game ${r.match ? r.match.n : ''}`;
-      tip.innerHTML = `<div class="muted">${esc(when(r.at))} · ${esc(game)} vs ${esc(r.opp || '')} · ${sgn(r.res ? r.res.pts : 0, 0)}</div><div><b>${f2(p.pr)}</b> this game <span class="muted">(${plural(p.gn, 'decision')})</span></div><div><b>${f2(p.roll)}</b> ± ${f1(p.ci)} last ${p.rn} <span class="muted">${esc(rating(p.roll))}</span></div>`;
+      hov.innerHTML = `<line x1="${X}" x2="${X}" y1="${mt}" y2="${mt + ph}" stroke="var(--muted)" stroke-width="1"/>${inR(p.cum) ? `<circle cx="${X}" cy="${y(p.cum)}" r="3.5" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.5"/>` : ''}${p.roll != null ? `<circle cx="${X}" cy="${y(p.roll)}" r="4.5" fill="var(--accent)" stroke="var(--panel)" stroke-width="2"/>` : ''}${inR(p.g) ? `<circle cx="${X}" cy="${y(p.g)}" r="5.5" fill="var(--ink)" stroke="var(--panel)" stroke-width="2"/>` : ''}`;
+      const cnt = !p.gn ? `no ${m.one}s` : m.hit ? `${p.gh} of ${plural(p.gn, m.one)}` : plural(p.gn, m.one);
+      tip.innerHTML = `<div class="muted">${esc(when(r.at))} · ${esc(gameName(r, true))} vs ${esc(oppName(r.opp))} · ${sgn(r.res ? r.res.pts : 0, 0)}</div>`
+        + `<div><b>${fmt(p.g)}</b> this game <span class="muted">(${esc(cnt)})</span></div>`
+        + `<div><b>${fmt(p.roll)}</b> ${esc(rangeText(m, p))} last ${p.rn}${m.opp ? ' (whole games)' : ''} <span class="muted">${m.xg ? esc(rating(p.roll)) : ''}</span></div>`
+        + `<div><b>${fmt(p.cum)}</b> all so far <span class="muted">(${plural(p.cn, m.one)})</span></div>`;
       tip.style.display = 'block';
       const tw = tip.offsetWidth, left = Math.min(Math.max(6, X + 12), el.clientWidth - tw - 6);
       tip.style.left = `${X + 12 + tw > el.clientWidth - 6 ? Math.max(6, X - tw - 12) : left}px`; tip.style.top = '8px';
@@ -547,12 +646,11 @@
     const items = reviewItems(games, costs, opp); if (!items.length) return toast('Nothing to review in this game');
     await showReview(items, `Review: ${r.type === 'cash' ? 'cash game' : `${r.len}-point match, game ${n}`} vs ${opp}, ${when(r.at)}`, undefined, opp);
   }
-  // The end-of-game panel's line about this game's progress record (tile).
-  function endLine(gm) {
+  // The end-of-game panel's words on this game's progress record (tile).
+  function endState(gm, M0) {
     if (TARGET !== 'tile') return '';
-    const id = gm.rules.type === 'match' && S.match ? `${S.match.id}-g${gm.n}` : gm.id;
-    const msg = tracked(id) ? 'Added to your progress.' : queued(id) ? 'Adding to your progress…' : gm.er ? '' : 'Added to your progress when your ER is ready.';
-    return `<div class="row">${btn('Progress', 'PG.open()')}${msg ? `<span class="small muted" style="align-self:center">${esc(msg)}</span>` : ''}</div>`;
+    const M = M0 || S.match, id = gm.rules.type === 'match' && M ? `${M.id}-g${gm.n}` : gm.id;
+    return tracked(id) ? 'Added to your progress.' : gm.er ? 'Adding to your progress…' : 'Added to your progress once your ER is ready.';
   }
   let cssDone = false;
   function css() {
@@ -569,11 +667,17 @@
   .pgov .pgfilters { display: flex; flex-wrap: wrap; gap: 8px; }
   .pgov .pgfilters .seg button { flex: 0 0 auto; white-space: nowrap; min-height: 34px; padding: 0 12px; font-size: 13.5px; }
   .pgov .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
-  .pgov .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  .pgov .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; align-items: flex-start; text-align: left; min-height: 0; white-space: normal; font: inherit; color: var(--ink); cursor: pointer; }
+  .pgov .tile.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .pgov .tile .lab { font-size: 12px; color: var(--muted); }
   .pgov .tile .val { font-size: 24px; font-weight: 650; line-height: 1.25; }
   .pgov .tile.hero .val { font-size: 48px; line-height: 1.1; }
   .pgov .tile .sub { font-size: 12px; color: var(--muted); }
+  .pgov .mchips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pgov .mchips button { min-height: 34px; padding: 0 11px; font-size: 13px; border-radius: 17px; }
+  .pgov details.vals summary { cursor: pointer; font-size: 13px; color: var(--accent); padding: 2px 0; }
+  .pgov details.vals[open] summary { margin-bottom: 6px; }
+  .pgov details.vals .tscroll { max-height: 340px; overflow-y: auto; }
   .pgov .tscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .pgov table.pt { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
   .pgov table.pt th { text-align: right; font-weight: 600; color: var(--muted); font-size: 11.5px; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -602,6 +706,6 @@
     setInterval(() => { if (!TR.busy && TR.q.length) kick(); if (TR.out.length) flush(); }, 15000);
     let rz = 0; window.addEventListener('resize', () => { if (!isOpen()) return; cancelAnimationFrame(rz); rz = requestAnimationFrame(hookChart); });   // turning the phone: the chart takes the new width
   }
-  window.PG = { init, setDb, kick, gameOver, enqueueFile, scan, open, close, setView, review, endLine, posType, TYPES, KINDS, COL,
-    _state: TR, _agg: agg, _series: series, _record: record, _fileGames: fileGames };
+  window.PG = { init, setDb, kick, gameOver, keepMatch, enqueueFile, scan, open, close, setView, metric, vals: (o) => { TR.view.vals = !!o; }, review, endState, isTracked: tracked, posType, TYPES, KINDS, COL, METRICS,
+    _state: TR, _agg: agg, _series: seriesOf, _metricOf: metricOf, _record: record, _fileGames: fileGames };
 })();

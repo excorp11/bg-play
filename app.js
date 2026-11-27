@@ -286,19 +286,34 @@ function newGameObj(n) {
 }
 function startCash(fresh) {
   if (fresh || !S.sess || S.sess.rules.jacoby !== S.set.jacoby || S.sess.rules.beavers !== S.set.beavers) S.sess = { id: uid(), started: Date.now(), rules: { jacoby: S.set.jacoby, beavers: S.set.beavers }, games: [], tally: 0 };
-  S.match = null; S.set.type = 'cash';
-  S.game = newGameObj(S.sess.games.length + 1); S.ui.view = null; save(); resetCaches(); drive();
+  leaveMatch(); S.match = null; S.set.type = 'cash';
+  S.game = newGameObj(S.sess.games.length + 1); S.ui.view = null; S.ui.home = false; save(); resetCaches(); drive();
 }
 function startMatch() {
+  leaveMatch();
   S.match = { id: uid(), started: Date.now(), length: S.set.length, ply: S.set.ply, score: { me: 0, bot: 0 }, crawfordNext: false, crawfordUsed: false, games: [], over: false };
-  S.set.type = 'match'; S.game = newGameObj(1); S.ui.view = null; save(); resetCaches(); drive();
+  S.set.type = 'match'; S.game = newGameObj(1); S.ui.view = null; S.ui.home = false; save(); resetCaches(); drive();
 }
 function nextGame() {
   if (S.set.type === 'match' && S.match && !S.match.over) { S.game = newGameObj(S.match.games.length + 1); }
   else if (S.set.type === 'cash') { startCash(false); return; }
   else { startMatch(); return; }
-  S.ui.view = null; save(); resetCaches(); drive();
+  S.ui.view = null; S.ui.home = false; save(); resetCaches(); drive();
 }
+// The start screen's Continue the match, whatever the menu's game type says by now.
+function continueMatch() { if (S.match && !S.match.over) { S.set.type = 'match'; nextGame(); } }
+// A match left unfinished for a new cash game or match. The tile has each game's progress record from when it ended;
+// the offline app keeps a match for the tile when it ends, so it keeps the games played in this one now.
+function leaveMatch() {
+  const M = S.match; if (!M || M.over || !M.games.length) return;
+  if (TARGET === 'pwa' && window.PG && PG.keepMatch) PG.keepMatch(M);
+}
+// Home: the start screen from the end of a game (the user's request, 2026-11-27: a way back to pick a cash game, a
+// match or the Blunder Quiz). The finished game stays S.game behind it, so its ER and its progress record finish as
+// they would on the end panel, and Back returns to that panel; the board shows the starting position. Not kept
+// across a reload.
+const atHome = () => !!(S.ui.home && !(S.game && S.game.quiz));
+function goHome(on = true) { S.ui.home = !!(on && S.game && S.game.phase === 'over'); S.ui.view = null; renderAll(); }
 async function resetCaches() { if (ENG.pool) try { await ENG.pool.all({ cmd: 'reset' }); } catch (e) { /* ignore */ } }
 function getTurn() {
   const gm = S.game, ts = gm.turnSt;
@@ -585,17 +600,21 @@ function endGame(winner, points, how, kind) {
 }
 let erBusy = false;
 async function finishER() {
-  const gm = S.game; if (!gm || gm.phase !== 'over' || erBusy) return;
+  // the game's own match and session: a new one may start (Next game, Home) before the ER is done
+  const gm = S.game, M = S.match, sess = S.sess; if (!gm || gm.phase !== 'over' || erBusy) return;
   erBusy = true;
   try {
     await Promise.all(gm.decisions.map((d) => analyzeDecision(d, 'hi')));
     if (gm.decisions.some((d) => !d.res)) return;          // the engine was stopped (a review opened): done after the restart
     gm.er = computeER(gm.decisions);
-    const rec = (gm.rules.type === 'cash' ? S.sess.games : S.match.games).find((x) => x.id === gm.id);
+    const rec = ((gm.rules.type === 'cash' ? sess && sess.games : M && M.games) || []).find((x) => x.id === gm.id);
     if (rec) { rec.er = { er: gm.er.er, n: gm.er.n, total: gm.er.total }; rec.decs = compactDecs(gm.decisions, 1); }
     save(); renderAll();
-    if (window.PG) PG.gameOver(gm);                  // progress: the tile scores it; the offline app keeps it for the tile
-  } finally { erBusy = false; }
+    if (window.PG) PG.gameOver(gm, M);               // progress: the tile scores it; the offline app keeps it for the tile
+  } finally {
+    erBusy = false;
+    if (S.game && S.game !== gm && S.game.phase === 'over' && !S.game.er && !S.game.quiz) finishER();   // a later game ended meanwhile
+  }
 }
 
 // ------------------------------------------------------------- board drawing
@@ -652,7 +671,7 @@ function viewBoard() {
   const gm = S.game, v = S.ui.view;
   if (S.ui.anim) return S.ui.anim.slice();
   if (v && v.board) return v.board.slice();
-  if (!gm) return R.START.slice();
+  if (!gm || atHome()) return R.START.slice();
   const t = gm.phase === 'move' && gm.onRoll === 'me' ? getTurn() : null;
   return t ? t.board.slice() : gm.board.slice();
 }
@@ -660,7 +679,7 @@ function drawBoard() {
   const svg = $('board'), Rc = svg.getBoundingClientRect(); if (!Rc.width) return;
   GEO = geometry(Rc.width, Rc.height); const G = GEO;
   svg.setAttribute('viewBox', `0 0 ${G.W} ${G.H}`);
-  const gm = S.game, b = viewBoard();
+  const gm = atHome() ? null : S.game, b = viewBoard();
   if (drag && drag.lifted) { if (drag.from === 25) b[25]--; else b[drag.from]--; }
   let s = `<rect x="0" y="0" width="${G.W}" height="${G.H}" rx="8" fill="var(--frame)"/>`;
   s += `<rect x="${G.x0}" y="${G.top - 2}" width="${12 * G.pw + G.bw}" height="${G.bot - G.top + 4}" fill="var(--felt)"/>`;
@@ -935,7 +954,7 @@ function shake(from) {
 function onKey(ev) {
   if (S.ui.menu || ev.target.tagName === 'TEXTAREA' || ev.target.tagName === 'INPUT') return;
   if (window.BQ && BQ.on) return BQ.key(ev);
-  const gm = S.game; if (!gm) return;
+  const gm = atHome() ? null : S.game; if (!gm) return;
   const k = ev.key.toLowerCase();
   if (k === ' ' || k === 'enter') { ev.preventDefault(); if (gm.phase === 'preroll' && gm.onRoll === 'me') userRoll(); else if (gm.phase === 'move') userDone(); else if (gm.phase === 'over') nextGame(); }
   else if (k === 'backspace' || k === 'u') userUndo();
@@ -950,7 +969,7 @@ function status(t) { statusText = t; }
 function toast(t, ms = 2000) { const el = $('toast'); el.textContent = t; el.classList.add('show'); clearTimeout(S.ui.toastT); S.ui.toastT = setTimeout(() => el.classList.remove('show'), ms); }
 function renderAll() { drawBoard(); renderSide(); }
 function scoreLine() {
-  const gm = S.game;
+  const gm = atHome() ? null : S.game;
   if (S.set.type === 'match' && S.match) {
     const M = S.match, craw = gm && gm.rules.type === 'match' && gm.crawford ? ' · Crawford game' : M.crawfordUsed ? ' · post-Crawford' : '';
     return `Match to ${M.length} · You ${M.score.me} – ${M.score.bot} Open Sage${craw}`;
@@ -964,18 +983,31 @@ function renderSide() {
   const el = $('side'); if (!el) return;
   const z = $('pasteZone'); if (z && document.activeElement === z) { sideLater = true; return; }   // don't pull the box from under the finger
   if (S.game && S.game.quiz && window.BQ) { el.innerHTML = BQ.side(); return; }
-  const gm = S.game, v = S.ui.view;
+  const gm = atHome() ? null : S.game, v = S.ui.view;
   let h = `<div class="bar-top"><div class="title">BG Play <span class="muted">vs Open Sage ${gm ? gm.ply : S.set.ply}-ply</span></div>${gm && gm.phase !== 'over' && !S.ui.view ? autoRollSwitch(gm) : ''}${btn('⋯', 'openMenu()', 'icon', false, 'Menu')}</div>`;
   h += `<div class="score">${esc(scoreLine())}</div>`;
   if (ENG.state !== 'ready') {
     h += `<div class="card"><div class="${ENG.state === 'error' ? 'bad' : 'muted'}">${esc(ENG.msg || 'Loading…')}</div>${ENG.state === 'error' ? btn('Retry', 'location.reload()') : ''}</div>`;
   }
   if (v && v.panel) { el.innerHTML = h + v.panel; return; }
-  if (!gm) {
-    h += `<div class="card"><p>Play Open Sage on this device: no connection needed.</p>
-      <div class="row">${btn('New cash game', 'startCash(true)', 'primary', ENG.state !== 'ready')}${btn('New match', 'openMenu(\'match\')', '', ENG.state !== 'ready')}</div>${TARGET === 'tile' ? `<div class="row">${btn('Progress', 'PG.open()')}${btn('Blunder Quiz', 'BQ.open()')}</div>` : ''}</div>${pasteZone()}`;
-  } else h += gamePanel(gm);
+  if (!gm) h += startScreen();
+  else h += gamePanel(gm);
   el.innerHTML = h;
+}
+// The start screen: the first thing shown, and Home from the end of a game.
+function startScreen() {
+  const dis = ENG.state !== 'ready', M = S.match, open = !!(M && !M.over), last = atHome() ? S.game : null;
+  let h = '<div class="card">';
+  h += last ? `<p>Last game: ${esc(resultText(last))}${last.er ? ` · ER ${last.er.er.toFixed(2)}` : ''}.</p>` : '<p>Play Open Sage on this device: no connection needed.</p>';
+  if (open) h += `<div class="row big">${btn(`Continue the ${M.length}-point match (${M.score.me}–${M.score.bot})`, 'continueMatch()', 'primary', dis)}</div>`;
+  // a cash game after a cash game carries on the session's tally (Menu → New session starts a new one)
+  h += `<div class="row${open ? '' : ' big'}">${btn('New cash game', `startCash(${S.set.type === 'cash' && S.sess ? 'false' : 'true'})`, open ? '' : 'primary', dis)}${btn('New match', 'openMenu(\'match\')', '', dis)}</div>`;
+  if (open) h += '<p class="muted small">A new cash game or match leaves this match unfinished; the games played in it still go to your progress.</p>';
+  if (TARGET === 'tile') h += `<div class="row">${btn('Progress', 'PG.open()')}${btn('Blunder Quiz', 'BQ.open()')}</div>`;
+  if (last) h += `<div class="row">${btn('Back to the last game', 'goHome(false)')}</div>`;
+  h += '</div>';
+  if (TARGET === 'pwa' && unsent().length) h += `<div class="row">${sendLink(sendLabel())}</div>`;
+  return h + pasteZone();
 }
 function gamePanel(gm) {
   let h = '';
@@ -1065,19 +1097,30 @@ function overPanel(gm) {
   }
   const M = S.match, isMatch = gm.rules.type === 'match';
   if (isMatch) h += `<div class="score">${M.over ? `Match over: ${M.score.me >= M.length ? 'you win' : 'Open Sage wins'} ${M.score.me}–${M.score.bot}` : `Match to ${M.length}: you ${M.score.me} – ${M.score.bot} Open Sage${M.crawfordNext ? ' · next game is the Crawford game' : ''}`}</div>`;
-  const canSave = !isMatch || M.over;
-  const savedAlready = S.saved.find((x) => x.id === (isMatch ? M.id : gm.id));
-  h += '<div class="row big">';
-  if (canSave && TARGET === 'pwa') h += savedAlready && savedAlready.want !== 'track' ? btn('Saved for review', 'openMenu(\'saved\')') : btn('Save for full analysis', 'saveForAnalysis()', '', !gm.er);
-  else if (canSave) h += savedAlready ? btn(savedLabel(savedAlready), 'openMenu(\'saved\')') : btn('Save for full analysis', 'saveForAnalysis()', '', !gm.er);
-  h += btn(isMatch ? (M.over ? 'New match' : 'Next game') : 'Next game', 'nextGame()', 'primary') + '</div>';
-  // Offline app: every finished game goes to your progress in the tile with Send to the tile (the user's choice, 2026-11-27)
-  const nU = TARGET === 'pwa' ? unsent().length : 0;
-  if (nU) h += `<div class="row">${sendLink(`Send ${plural(nU, 'game')} to the tile`)}</div><div class="muted small">Every finished game goes to your progress in the tile; games saved for full analysis are reviewed as well.</div>`;
-  if (canSave) h += `<div class="row">${btn('Download .mat', 'downloadMat()')}</div>`;
-  else h += `<div class="muted small">When the match ends you can save it for full analysis.</div>`;
-  if (window.PG) h += PG.endLine(gm);
+  h += `<div class="row big">${btn('Home', 'goHome()')}${btn(isMatch ? (M.over ? 'New match' : 'Next game') : 'Next game', 'nextGame()', 'primary')}</div>`;
+  h += fateCard(gm);
+  if (!isMatch || M.over) h += `<div class="row">${btn('Download .mat', 'downloadMat()')}</div>`;
   return h + pasteZone();
+}
+// Where this game goes: your progress always, Claude's full review only when you ask for it (the user's request,
+// 2026-11-27: make it clear which games go for analysis and which only for tracking).
+function fateCard(gm) {
+  const M = S.match, isMatch = gm.rules.type === 'match', canSave = !isMatch || !!(M && M.over);
+  const sv = S.saved.find((x) => x.id === (isMatch && M ? M.id : gm.id)), forReview = !!(sv && sv.want !== 'track');
+  let prog, rev, act = '';
+  if (TARGET === 'tile') prog = window.PG ? PG.endState(gm, M) : '';
+  else if (!canSave) prog = 'The match goes to your progress in the tile when it ends.';
+  else if (sv && sv.status === 'copied') prog = 'Copied for the tile: once it\'s pasted there, it\'s in your progress.';
+  else prog = sv ? 'Goes to your progress when you send it to the tile.' : 'Goes to your progress when you send it to the tile (ready once your ER is).';
+  if (!canSave) rev = 'You can ask for it when the match ends.';
+  else if (!forReview) { rev = 'Only when you ask for it.'; act = btn('Save for full analysis', 'saveForAnalysis()', '', !gm.er); }
+  else if (TARGET === 'pwa') rev = 'Saved: Claude reviews every move once it reaches the tile.';
+  else if (sv.review) { rev = 'Review ready.'; act = `<a class="btnlink primary" href="${esc(sv.review)}" target="_blank" rel="noopener">Open the review</a>`; }
+  else { rev = `${savedLabel(sv)}: Claude reviews every move in your project, and the link appears in Full reviews when it's ready.`; act = btn('Full reviews', 'openMenu(\'saved\')'); }
+  let h = `<div class="card fate"><div class="fl"><b>Progress</b><span>${esc(prog)}</span>${TARGET === 'tile' ? `<div class="acts">${btn('Progress', 'PG.open()')}</div>` : ''}</div>`;
+  h += `<div class="fl"><b>Full review</b><span>${esc(rev)}</span>${act ? `<div class="acts">${act}</div>` : ''}</div></div>`;
+  if (TARGET === 'pwa' && unsent().length) h += `<div class="row">${sendLink(sendLabel())}</div>`;
+  return h;
 }
 const decPlayed = (d) => (d.k === 'M' ? `${d.dice[0]}-${d.dice[1]} ${d.played}` : { R: 'No double', D: 'Double', T: 'Take', P: 'Pass', B: 'Beaver' }[d.k]);
 function viewDecision(i) {
@@ -1294,8 +1337,10 @@ function tog(k, label) { return `<label class="tog"><input type="checkbox" ${S.s
 function renderMenu() {
   const gm = S.game, inGame = gm && gm.phase !== 'over', sec = S.ui.menu;
   if (sec === 'paste' || !sec) return;
-  let h = `<div class="mhead"><h3>${sec === 'saved' ? 'Saved games' : sec === 'match' ? 'New match' : 'Menu'}</h3>${btn('✕', 'closeMenu()', 'icon')}</div>`;
+  const head = { saved: TARGET === 'pwa' ? 'Games for the tile' : 'Full reviews', imported: 'Games from the offline app', match: 'New match' }[sec] || 'Menu';
+  let h = `<div class="mhead"><h3>${head}</h3>${btn('✕', 'closeMenu()', 'icon')}</div>`;
   if (sec === 'saved') { $('menu').innerHTML = h + savedSection(); return; }
+  if (sec === 'imported') { $('menu').innerHTML = h + importedSection(); return; }
   if (sec === 'scoring') {
     const J = RVJOB, f = J && J.n ? Math.round((100 * J.done) / J.n) : 0;
     $('menu').innerHTML = `<div class="mhead"><h3>Getting the review ready</h3>${btn('✕', 'closeMenu()', 'icon')}</div><p class="small">${J ? `${esc(J.title)}: scoring your moves at ${ER_PLY}-ply on this device, ${J.done} of ${J.n}. Games saved before the review kept no move-by-move results; this happens once.` : ''}</p><div style="height:8px;border-radius:4px;background:var(--line);overflow:hidden"><div style="height:100%;width:${f}%;background:var(--accent)"></div></div><div class="row" style="margin-top:10px">${btn('Cancel', 'cancelScoring()')}</div>`;
@@ -1323,7 +1368,8 @@ function renderMenu() {
   h += '</section><section>';
   h += `<h4>Play</h4><div class="tograw">${tog('autoBear', 'Auto-bearoff (no contact: take off 2, or 4 on doubles)')}${tog('autoRoll', 'Roll for me when I can\'t double (Open Sage owns the cube)')}${tog('autoForced', 'Play forced moves for me')}${tog('autoDone', 'Finish the turn without Done')}</div>`;
   h += `<h4>Board</h4><div class="tograw">${tog('pips', 'Pip counts')}${tog('swapColour', 'Swap colours')}${tog('mirror', 'Home board on the left')}</div>${seg('speed', [['normal', 'Normal'], ['fast', 'Fast'], ['off', 'No animation']])}`;
-  h += `<h4>Saved games</h4>${btn(`Saved games (${S.saved.length})`, 'openMenu(\'saved\')')}`;
+  if (TARGET === 'pwa') { const nU = unsent().length; h += `<h4>Games for the tile</h4><div class="row">${btn(`Games for the tile (${S.saved.length})`, 'openMenu(\'saved\')')}</div>${nU ? `<div class="row" style="margin-top:6px">${sendLink(sendLabel())}</div>` : ''}`; }
+  else h += `<h4>Full reviews</h4>${btn(`Full reviews (${S.saved.length})`, 'openMenu(\'saved\')')}`;
   if (TARGET === 'tile') h += `<h4>Progress</h4><div class="row">${btn('Progress', 'PG.open()')}${btn('Blunder Quiz', 'BQ.open()', '', !!(gm && gm.phase !== 'over' && (gm.onRoll !== 'me' || busy)))}</div>`;
   else { const nU = unsent().length; h += `<h4>Progress</h4><p class="small muted">Your progress is in the BG Play tile: every game you finish here goes there with Send to the tile${nU ? ` (${plural(nU, 'game')} waiting)` : ''}.</p>`; }
   h += `<h4>Engine</h4><div class="field">Workers ${['1', '2', '4', '6'].map((n) => btn(n, `setWorkers(${n})`, S.set.workers === +n ? 'on' : '')).join('')}</div>`;
@@ -1340,21 +1386,20 @@ function gameTitle(kind, rec, when) {
   const d = new Date(when), ds = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   return kind === 'match' ? `${rec.length}-point match vs Open Sage, ${ds}` : `Cash game vs Open Sage, ${ds}`;
 }
-function buildMat(kind) {
-  const gm = S.game;
+// The game file of a cash game or a match: the one given, else the current one (a new game may have started since).
+function buildMat(kind, gm = S.game, M = S.match) {
   if (kind === 'match') {
-    const M = S.match;
     return { id: M.id, kind, ply: M.ply, length: M.length, title: gameTitle('match', M, M.started),
       mat: R.matText({ id: 'bgp-' + M.id, p1: USER, p2: botName(M.ply), length: M.length, ply: M.ply, date: new Date(M.started) }, M.games.map((g) => ({ score: [g.score.me, g.score.bot], events: g.events }))),
-      result: `${M.score.me}–${M.score.bot}`, er: matchER(), decsPly: M.games.every((g) => g.decs) ? ER_PLY : 0,
+      result: `${M.score.me}–${M.score.bot}${M.over ? '' : ' (unfinished)'}`, er: matchER(M), decsPly: M.games.every((g) => g.decs) ? ER_PLY : 0,
       decs: M.games.flatMap((g, i) => (g.decs || []).map((x) => ({ ...x, g: i + 1 }))) };
   }
   return { id: gm.id, kind: 'cash', ply: gm.ply, title: gameTitle('cash', gm, gm.started),
     mat: R.matText({ id: 'bgp-' + gm.id, p1: USER, p2: botName(gm.ply), length: 0, ply: gm.ply, jacoby: gm.rules.jacoby, beavers: gm.rules.beavers, date: new Date(gm.started) }, [{ score: [0, 0], events: gm.events }]),
     result: resultText(gm), er: gm.er ? { er: gm.er.er, n: gm.er.n, total: gm.er.total } : null, decs: compactDecs(gm.decisions, 1), decsPly: gm.er ? ER_PLY : 0 };
 }
-function matchER() {
-  const gs = S.match.games.filter((g) => g.er); if (!gs.length) return null;
+function matchER(M = S.match) {
+  const gs = M.games.filter((g) => g.er); if (!gs.length) return null;
   const n = gs.reduce((a, g) => a + g.er.n, 0), total = gs.reduce((a, g) => a + g.er.total, 0);
   return { er: n ? total * 500 / n : 0, n, total };
 }
@@ -1362,30 +1407,39 @@ function matchER() {
 function matResult(chk) {
   if (chk.kind === 'cash') { const r = chk.games[0].result; return `${r.winner === 'me' ? 'You win' : 'Open Sage wins'} ${plural(r.points, 'point')}`; }
   const last = chk.games[chk.games.length - 1], sc = { ...last.score }; sc[last.result.winner] += last.result.points;
-  return `${sc.me}–${sc.bot}`;
+  return `${sc.me}–${sc.bot}${Math.max(sc.me, sc.bot) >= chk.rules.length ? '' : ' (unfinished)'}`;
 }
 function savedLabel(x) {
-  if (x.want === 'track') return x.status === 'copied' ? 'For progress: copied for the tile' : 'For progress: not sent yet';
-  return { local: TARGET === 'pwa' ? 'Saved on this device: not sent yet' : 'Saved on this device', queued: 'Queued: sends when online', sending: 'Sending…', sent: 'Sent for analysis', copied: 'Copied for the tile', reviewing: 'Being analysed', done: 'Review ready', error: 'Not sent: tap to retry' }[x.status] || x.status; }
+  // the offline app: whether it has gone to the tile yet (the lists' headings say what each game is for)
+  if (TARGET === 'pwa') return x.status === 'copied' ? `Copied for the tile ${new Date(x.copied || Date.now()).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}: paste it there if you haven't` : 'Not sent to the tile yet';
+  return { local: 'Saved on this device', queued: 'Queued: sends when online', sending: 'Sending…', sent: 'Sent to Claude', copied: 'Copied for the tile', reviewing: 'Claude is reviewing it', done: 'Review ready', error: 'Not sent: tap Retry sending' }[x.status] || x.status; }
+// Offline app: a game kept for your progress only, now for Claude's full review as well (sent with the next Send).
+function wantReview(id) {
+  const e = S.saved.find((x) => x.id === id); if (!e || TARGET !== 'pwa') return;
+  e.want = 'review'; e.status = 'local'; e.copied = 0; save(); prepareBundle(); renderAll(); if (S.ui.menu) renderMenu();
+  toast('Marked for Claude\'s full review: it goes with your next Send to the tile.', 3500);
+}
+// Offline app: what Send to the tile will carry.
+function sendLabel() {
+  const u = unsent(), r = u.filter((x) => x.want !== 'track').length, t = u.length - r;
+  return `Send to the tile: ${[r ? `${r} for full review` : '', t ? `${t} for progress only` : ''].filter(Boolean).join(', ')}`;
+}
 async function saveForAnalysis() {
   const gm = S.game; if (!gm || gm.phase !== 'over') return;
   const kind = gm.rules.type === 'match' ? 'match' : 'cash';
   const e = { ...buildMat(kind), created: Date.now(), status: 'local', want: 'review' };
   const ex = S.saved.find((x) => x.id === e.id);
-  if (ex && TARGET === 'pwa' && ex.want === 'track') {     // kept for progress already: now for review too
-    ex.want = 'review'; ex.status = 'local'; ex.copied = 0; save(); prepareBundle(); renderAll(); if (S.ui.menu) renderMenu();
-    toast('Saved for full analysis. Tap Send to the tile when you\'re online.', 3500); return;
-  }
+  if (ex && TARGET === 'pwa' && ex.want === 'track') return wantReview(ex.id);     // kept for progress already: now for review too
   if (ex) return openMenu('saved');
   S.saved.unshift(e); save(); renderAll();
   if (TARGET === 'tile') await sendOne(e);
-  else { e.status = 'local'; save(); prepareBundle(); toast('Saved on this device. Tap Send to the tile when you\'re online.', 3500); }
+  else { e.status = 'local'; save(); prepareBundle(); toast('Saved for Claude\'s full review: it goes with your next Send to the tile.', 3500); }
 }
 // Tile: write the game to the page's database, then start the scheduled analysis. Offline or no database: queue it.
 let CAP = { db: null, mcp: null, dl: null };
 async function sendOne(e, note = '') {
   if (TARGET !== 'tile') return;
-  if (!navigator.onLine || !CAP.db) { e.status = 'queued'; save(); renderAll(); if (S.ui.menu) renderMenu(); toast((navigator.onLine ? 'Saved; it will be sent when the tile can reach Claude' : 'Saved; it will be sent when you\'re online') + note); return; }
+  if (!navigator.onLine || !CAP.db) { e.status = 'queued'; save(); renderAll(); if (S.ui.menu) renderMenu(); if (note !== null) toast((navigator.onLine ? 'Saved; it will be sent when the tile can reach Claude' : 'Saved; it will be sent when you\'re online') + note); return; }
   e.status = 'sending'; save(); renderAll();
   try {
     await CAP.db.doc('games/' + e.id).set({ id: e.id, kind: e.kind, title: e.title, mat: e.mat, ply: e.ply, result: e.result, er: e.er, created: new Date(e.created).toISOString(),
@@ -1395,14 +1449,16 @@ async function sendOne(e, note = '') {
   await fireTask(e, note);
   renderAll(); if (S.ui.menu) renderMenu();
 }
+// note null: the paste's summary is showing, so no toasts (it shows each game's state)
 async function fireTask(e, note = '') {
-  if (!CAP.mcp || !TRIGGER_ID) { toast('Saved. The analysis starts with the next run of the scheduled task.' + note); return; }
-  try { await CAP.mcp.callTool('Claude Code Remote', 'fire_trigger', { trigger_id: TRIGGER_ID }); toast('Sent: the review will appear in your project' + note); e.fired = Date.now(); save(); }
+  const say = (t, ms) => { if (note !== null) toast(t + (note || ''), ms); };
+  if (!CAP.mcp || !TRIGGER_ID) { say('Saved. The analysis starts with the next run of the scheduled task.'); return; }
+  try { await CAP.mcp.callTool('Claude Code Remote', 'fire_trigger', { trigger_id: TRIGGER_ID }); say('Sent: the review will appear in your project'); e.fired = Date.now(); save(); }
   catch (err) {
     const c = err && err.code;
     const why = { needs_reauth: 'Reconnect Claude Code Remote in claude.ai Settings → Connectors', server_not_connected: 'Add Claude Code Remote in claude.ai Settings → Connectors',
       not_in_manifest: 'Allow Claude Code Remote for this tile to start reviews', approval_required: 'Allow the tile to start the review when Claude asks' }[c];
-    e.fireErr = why || ('Couldn\'t start the review: ' + (c || err)); save(); toast(e.fireErr + '. The game is saved; Retry in Saved games' + (note || '.'), 4000);
+    e.fireErr = why || ('Couldn\'t start the review: ' + (c || err)); save(); if (note !== null) toast(e.fireErr + '. The game is saved; Start the review in Full reviews' + (note || '.'), 4000);
   }
 }
 async function flushQueue() {
@@ -1424,21 +1480,64 @@ function watchReviews() {
     }, () => { watchReviews.on = false; });
   } catch (e) { watchReviews.on = false; }
 }
+// Saved games. The offline app: every game waiting for the tile, in two lists, for Claude's full review and for
+// progress only. The tile: the games sent to Claude for review, with their reviews.
 function savedSection() {
-  let h = '';
-  if (TARGET === 'pwa') {
-    const n = unsent().length; if (n && !BUNDLE) prepareBundle();
-    h += `<div class="card"><p class="small">Reviews run in your Claude project. Send to the tile copies the games and opens the BG Play tile (you need a connection): tap its box and Paste.</p>${n ? `<div class="row">${sendLink(`Send ${plural(n, 'game')} to the tile`, 'primary')}</div>` : ''}</div>`;
-  } else h += `<div class="row">${btn('Paste games from the offline app', 'openPaste(\'games\')', 'primary')}${btn('Retry sending', 'flushQueue()', '', !S.saved.some((x) => x.status === 'queued' || x.status === 'error'))}</div>`;
-  if (!S.saved.length) return h + `<p class="muted">${TARGET === 'pwa' ? 'No games yet. Every game you finish is kept here until you send it to the tile, for your progress (and for review when you save it for full analysis).' : 'No saved games yet. Finish a game and tap Save for full analysis.'}</p>`;
-  h += '<div class="saved">';
-  for (const e of S.saved) {
-    h += `<div class="sv"><div><b>${esc(e.title)}</b> · ${esc(e.result || '')}${e.er ? ` · ER ${(+e.er.er).toFixed(2)}` : ''}</div><div class="small ${e.status === 'error' ? 'bad' : 'muted'}">${esc(savedLabel(e))}${e.fireErr && e.status === 'sent' ? ' · ' + esc(e.fireErr) : ''}${e.err && e.status === 'error' ? ' · ' + esc(e.err) : ''}</div><div class="row">`;
-    if (e.review) h += `<a class="btnlink primary" href="${esc(e.review)}" target="_blank" rel="noopener">Open the review</a>`;
-    if (TARGET === 'tile' && e.status === 'sent' && e.fireErr) h += btn('Start the review', `retryFire(${esc(JSON.stringify(e.id))})`);
-    h += btn('Review', `openReview(${esc(JSON.stringify(e.id))})`) + btn('Download .mat', `downloadMat(${esc(JSON.stringify(e.id))})`) + btn('Remove', `removeSaved(${esc(JSON.stringify(e.id))})`) + '</div></div>';
+  if (TARGET === 'pwa') return pwaSaved();
+  let h = `<p class="small">Games saved for full analysis go to Claude, who reviews every move in your Backgammon Analysis project; each one's link appears here when it's ready. Every game you finish goes to Progress as well, saved or not.</p>`;
+  h += `<div class="row">${btn('Paste games from the offline app', 'openPaste(\'games\')', 'primary')}</div>`;
+  if (S.saved.some((x) => x.status === 'queued' || x.status === 'error')) h += `<div class="row" style="margin-top:6px">${btn('Retry sending', 'flushQueue()')}</div>`;
+  if (!S.saved.length) return h + '<p class="muted">None yet. At the end of a game, tap Save for full analysis.</p>';
+  return h + savedList(S.saved);
+}
+const hhmm = (t) => { const d = new Date(t); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+function savedList(list, opts = {}) {
+  let h = '<div class="saved">';
+  for (const e of list) {
+    const id = esc(JSON.stringify(e.id));
+    h += `<div class="sv"><div><b>${esc(e.title)}${e.created ? ' ' + hhmm(e.created) : ''}</b> · ${esc(e.result || '')}${e.er ? ` · ER ${(+e.er.er).toFixed(2)}` : ''}</div><div class="small ${e.status === 'error' ? 'bad' : 'muted'}">${esc(savedLabel(e))}${e.fireErr && e.status === 'sent' ? ' · ' + esc(e.fireErr) : ''}${e.err && e.status === 'error' ? ' · ' + esc(e.err) : ''}</div>`;
+    let row = '';
+    if (e.review) row += `<a class="btnlink primary" href="${esc(e.review)}" target="_blank" rel="noopener">Open the review</a>`;
+    if (TARGET === 'tile' && e.status === 'sent' && e.fireErr) row += btn('Start the review', `retryFire(${id})`);
+    if (row) h += `<div class="row">${row}</div>`;
+    if (opts.wantReview) h += `<div class="row">${btn('Ask for a full review', `wantReview(${id})`)}</div>`;
+    if (!opts.short) h += `<div class="row">${btn('Review', `openReview(${id})`)}${btn('Download .mat', `downloadMat(${id})`)}${btn('Remove', `removeSaved(${id})`)}</div>`;
+    h += '</div>';
   }
   return h + '</div>';
+}
+function pwaSaved() {
+  const n = unsent().length; if (n && !BUNDLE) prepareBundle();
+  const rv = S.saved.filter((x) => x.want !== 'track'), tr = S.saved.filter((x) => x.want === 'track');
+  let h = `<p class="small">Games go to the BG Play tile in Claude by copy and paste. ${n ? 'Send to the tile copies them and opens the tile (you need a connection): tap its box and Paste.' : 'Every game you finish waits here until you send it.'}</p>`;
+  if (n) h += `<div class="row">${sendLink(sendLabel(), 'primary')}</div>`;
+  h += `<h4>For Claude's full review (${rv.length})</h4><p class="small muted">Claude reviews every move of these in your Backgammon Analysis project; they go to your progress too.</p>`;
+  h += rv.length ? savedList(rv) : '<p class="small muted">None. At the end of a game tap Save for full analysis, or Ask for a full review below.</p>';
+  h += `<h4>For your progress only (${tr.length})</h4><p class="small muted">The tile scores these for its Progress tab; Claude doesn't review them. Once sent they drop off this list after a month.</p>`;
+  h += tr.length ? savedList(tr, { wantReview: true }) : '<p class="small muted">None.</p>';
+  return h;
+}
+// Tile: what a paste from the offline app brought, in place of the toast (the user's request, 2026-11-27: which games
+// went for analysis and which only for tracking). Kept until the next paste or a reload.
+function importedSection() {
+  const I = S.ui.imp || { review: [], track: [], refused: 0 };
+  const rv = I.review.map((id) => S.saved.find((e) => e.id === id)).filter(Boolean);
+  let h = `<p class="small">${plural(rv.length + I.track.length, 'game')} from the offline app.</p>`;
+  h += `<h4>For Claude's full review (${rv.length})</h4>`;
+  if (rv.length) h += `<p class="small muted">Claude reviews every move of these in your Backgammon Analysis project; each one's link appears in Full reviews when it's ready. They go to your progress too.</p>${savedList(rv, { short: true })}`;
+  else h += '<p class="small muted">None this time. In the offline app, Save for full analysis (or Ask for a full review in its list) marks a game for review.</p>';
+  h += `<h4>For your progress only (${I.track.length})</h4>`;
+  if (I.track.length) {
+    h += '<p class="small muted">Scored on this device for the Progress tab; not sent to Claude.</p><div class="saved">';
+    for (const t of I.track) {
+      const done = !!(window.PG && t.ids.length && t.ids.every((id) => PG.isTracked(id)));
+      h += `<div class="sv"><div><b>${esc(t.title)} ${hhmm(t.at)}</b> · ${esc(t.result)}</div><div class="small ${done ? 'good' : 'run'}">${done ? 'In your progress' : 'Adding to your progress…'}</div></div>`;
+    }
+    h += '</div>';
+  } else h += '<p class="small muted">None this time.</p>';
+  if (I.refused) h += `<p class="small bad">${plural(I.refused, 'pasted game')} ${I.refused === 1 ? 'wasn\'t a BG Play game file and was' : 'weren\'t BG Play game files and were'} left out.</p>`;
+  h += `<div class="row" style="margin-top:10px">${btn('Progress', 'PG.open()')}${btn('Full reviews', 'openMenu(\'saved\')')}${btn('Done', 'closeMenu()', 'primary')}</div>`;
+  return h;
 }
 async function retryFire(id) { const e = S.saved.find((x) => x.id === id); if (e) { e.fireErr = null; await fireTask(e); renderMenu(); } }
 function removeSaved(id) { S.saved = S.saved.filter((x) => x.id !== id); save(); renderMenu(); renderAll(); }
@@ -1490,7 +1589,7 @@ async function prepareBundle() {
 // With no connection the tap only copies.
 function sendLink(label, cls = '') {
   const go = navigator.onLine && TILE_URL;
-  return `<a class="btnlink ${cls}" href="${esc(go ? TILE_URL + '#paste' : '#')}" target="_blank" rel="noopener" onclick="return sendToTile()">${go ? label : `Copy ${plural(unsent().length, 'game')} for the tile`}</a>`;
+  return `<a class="btnlink ${cls}" href="${esc(go ? TILE_URL + '#paste' : '#')}" target="_blank" rel="noopener" onclick="return sendToTile()">${esc(go ? label : label.replace(/^Send to the tile/, 'Copy for the tile'))}</a>`;
 }
 function sendToTile() {
   const B = BUNDLE; if (!B) { prepareBundle(); toast('Getting the games ready: tap again'); return false; }
@@ -1539,7 +1638,7 @@ async function importText(raw) {
     if (!mg) throw new Error('That isn\'t text copied from BG Play.');
     if (TARGET !== 'tile') throw new Error('Paste these games into the BG Play tile in Claude: it starts the reviews.');
     if (sum(mg[3]) !== +mg[2]) throw new Error('That isn\'t the whole text: copy it again in the offline app.');
-    const list = await unpackJson(mg[3]); const added = [], forProgress = []; let refused = 0;
+    const list = await unpackJson(mg[3]); const added = [], forProgress = [], review = []; let refused = 0;
     if (!Array.isArray(list)) throw new Error('That isn\'t a list of games.');
     // Only BG Play's own game files get in, checked line by line and replayed move by move (rules.js
     // checkBgPlayMat): its headers and player names, its move lines, legal moves and cube actions, a result that fits.
@@ -1551,20 +1650,21 @@ async function importText(raw) {
       if (chk.id !== x.id) { refused++; continue; }
       const created = Number.isFinite(+x.created) ? Math.min(Math.max(+x.created, 1.5e12), Date.now() + 864e5) : Date.now();
       // marked for progress only (the offline app keeps every finished game): scored here for the Progress tab, not sent to Claude
-      if (x.want === 'track') { if (window.PG) PG.enqueueFile({ id: x.id, src: 'pwa', at: created, mat: x.mat, ply: chk.ply }); forProgress.push(x.id); continue; }
-      if (S.saved.find((e) => e.id === x.id)) continue;
+      if (x.want === 'track') {
+        if (window.PG) PG.enqueueFile({ id: x.id, src: 'pwa', at: created, mat: x.mat, ply: chk.ply });
+        forProgress.push({ id: x.id, title: gameTitle(chk.kind, { length: chk.rules.length }, created), at: created, result: matResult(chk), ids: chk.kind === 'match' ? chk.games.map((G) => `${x.id}-g${G.n}`) : [x.id] });
+        continue;
+      }
+      review.push(x.id);
+      if (S.saved.find((e) => e.id === x.id)) continue;      // sent before: shown with its review's state
       const er = x.er && [x.er.er, x.er.n, x.er.total].every((v) => Number.isFinite(+v)) ? { er: +x.er.er, n: +x.er.n, total: +x.er.total } : null;
       const e = { id: x.id, kind: chk.kind, title: gameTitle(chk.kind, { length: chk.rules.length }, created), mat: x.mat, ply: chk.ply, result: matResult(chk), er, created, status: 'local', source: 'pwa' };
       S.saved.unshift(e); added.push(e);
     }
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();   // close the keyboard
-    save(); clearHash(); openMenu('saved');
-    const left = refused ? ` ${plural(refused, 'pasted game')} ${refused === 1 ? 'wasn\'t a BG Play game file and was' : 'weren\'t BG Play game files and were'} left out.` : '';
-    const parts = []; if (added.length) parts.push(`${plural(added.length, 'game')} sent for review`); if (forProgress.length) parts.push(`${plural(forProgress.length, 'game')} going to your progress`);
-    toast((parts.length ? `From the offline app: ${parts.join(', ')}.` : refused ? 'No games added.' : 'Those games are already here.') + left, 5000);
-    // the last send's message replaces the summary, so it carries the games going to your progress
-    const note = forProgress.length ? `. ${plural(forProgress.length, 'game')} going to your progress.` : '';
-    for (const [i, e] of added.entries()) await sendOne(e, i === added.length - 1 ? note : '');
+    S.ui.imp = { review: [...new Set(review)], track: forProgress, refused };
+    save(); clearHash(); openMenu('imported');
+    for (const e of added) await sendOne(e, null);   // the summary shows each one's state: no toasts
     if (window.PG) PG.scan();                        // the games for review go to your progress too
   } catch (e) { pasteMsg(e.message || String(e)); }
 }
