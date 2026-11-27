@@ -94,8 +94,8 @@
   .tograw { display: flex; flex-direction: column; gap: 2px; }
   .tog { display: flex; align-items: center; gap: 8px; min-height: 38px; cursor: pointer; }
   .tog input { width: 20px; height: 20px; accent-color: var(--accent); }
-  .tog.autoroll { flex-wrap: wrap; column-gap: 8px; row-gap: 0; padding: 2px 0; }
-  .tog.autoroll .small { flex: 1 1 auto; }
+  .bar-top .tog.autoroll { flex: none; gap: 6px; padding: 0 4px; min-height: 36px; font-size: 13.5px; white-space: nowrap; }
+  .bar-top .tog.autoroll.on { color: var(--accent); font-weight: 700; }
   .field { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
   .field button { min-width: 44px; }
   .stepper { display: inline-flex; align-items: center; gap: 8px; } .stepper b { min-width: 2ch; text-align: center; font-size: 16px; }
@@ -114,7 +114,7 @@
   #rvFrame { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; z-index: 40; background: var(--bg); }
   @media (orientation: portrait) {
     #app { flex-direction: column; gap: 6px; }
-    #boardWrap { flex: none; width: 100%; height: min(88vw, 60vh); }
+    #boardWrap { flex: none; width: 100%; height: min(calc(88vw + 60px), 66vh); }
     #side { width: 100%; flex: 1 1 0; min-height: 0; }
   }
   @media (orientation: landscape) and (max-height: 420px) { .row.big button { min-height: 42px; } .status { font-size: 15px; } #side { gap: 5px; } }
@@ -129,7 +129,7 @@
 <div class="ov" id="ovMenu" onclick="if (event.target === this) closeMenu()"><div class="sheet" id="menu"></div></div>
 <div class="toast" id="toast"></div>
 <button id="update" class="primary" onclick="location.reload()">A new version is ready: tap to reload</button>
-<script>window.BGP_TARGET="pwa";window.BGP_VERSION="2026.11.27-c43b4eb7";window.BGP_TILE_URL="https://claude.ai/artifact/Sr472PM5geY9AhTPzhwWHt";window.BGP_TRIGGER="";</script>
+<script>window.BGP_TARGET="pwa";window.BGP_VERSION="2026.11.27-2ceb91f8";window.BGP_TILE_URL="https://claude.ai/artifact/Sr472PM5geY9AhTPzhwWHt";window.BGP_TRIGGER="";</script>
 <script src="rules.js"></script>
 <script src="app.js"></script>
 </body>

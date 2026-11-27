@@ -5,6 +5,7 @@ const DESKTOP = /*DESKTOP*/false;
 // opening book and, in the tile, Claude through window.parent.BGP_RV.
 const RVX = (() => { try { return window.parent !== window ? window.parent.BGP_RV || null : null; } catch (e) { return null; } })();
 const REVIEW = true;
+const rvBand = (e) => { const v = +Math.max(0, e).toFixed(3); return v >= 0.08 ? 'blunder' : v >= 0.02 ? 'error' : 'close'; };
 const START = [0, -2, 0, 0, 0, 0, 5, 0, 3, 0, 0, 0, -5, 5, 0, 0, 0, -3, 0, -5, 0, 0, 0, 0, 2, 0];
 const S = {
   mode: 'setup', board: START.slice(), placing: 1, dice: null, decision: 'checker', roPreset: 'standard',
@@ -904,7 +905,7 @@ function sideResults() {
   const busyRO = r.rollout && !r.rollout.done;
   if (r.kind === 'checker') {
     const list = ranked();
-    const rows = list.map((p, i) => `<tr class="${i === S.sel ? 'sel' : ''} ${i === 0 ? 'first' : ''}" onclick="RV.follow=false;S.sel=${i};pickPreview();render()"${DESKTOP ? ` onmouseenter="hoverPlay(${i})"` : ''}><td class="n">${i + 1}</td><td class="mv">${p.name}${rvTag(p)}${p.book ? (p.book.models || []).map((m) => `<span class="mdl">${{ xg: 'XG', sage: 'Sage', gnu: 'GNU' }[m]}</span>`).join('') + (p.book.rule ? '<span class="mdl rl">Rule</span>' : '') + (p.book.tag ? `<small class="btag">${p.book.tag}</small>` : '') : ''}</td><td class="eq">${(r.book ? p.unlisted : p.lv < Math.max(...list.map((x) => x.lv))) ? `<i>${eqs(p.e)}</i>` : eqs(p.e)}</td><td class="err">${i ? '−' + Math.max(0, p.err).toFixed(3) : 'best'}</td><td class="d">${lvTxt(p, true)}</td></tr>`).join('');
+    const rows = list.map((p, i) => `<tr class="${i === S.sel ? 'sel' : ''} ${i === 0 ? 'first' : ''}" onclick="RV.follow=false;S.sel=${i};pickPreview();render()"${DESKTOP ? ` onmouseenter="hoverPlay(${i})"` : ''}><td class="n">${i + 1}</td><td class="mv">${p.name}${rvTag(p)}${p.book ? (p.book.models || []).map((m) => `<span class="mdl">${{ xg: 'XG', sage: 'Sage', gnu: 'GNU' }[m]}</span>`).join('') + (p.book.rule ? '<span class="mdl rl">Rule</span>' : '') + (p.book.tag ? `<small class="btag">${p.book.tag}</small>` : '') : ''}</td><td class="eq">${(r.book ? p.unlisted : p.lv < Math.max(...list.map((x) => x.lv))) ? `<i>${eqs(p.e)}</i>` : eqs(p.e)}</td><td class="err${i ? ' ' + rvBand(p.err) : ''}">${i ? '−' + Math.max(0, p.err).toFixed(3) : 'best'}</td><td class="d">${lvTxt(p, true)}</td></tr>`).join('');
     const sel = list[S.sel];
     $('side').innerHTML = `${head}<div class="list"><table${DESKTOP ? ' onmouseleave="hoverPlay(-1)"' : ''}>${rows}</table>${bookNotes(r)}</div>
       ${sel && sel.probs ? probTable(sel.probs, `after #${S.sel + 1}`) : ''}

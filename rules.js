@@ -175,6 +175,30 @@
       }
       return null;
     }
+    // Tap on your tray: every checker the dice left can bear off, as if each had been tapped; no move that doesn't bear
+    // off. Each die takes off the checker on its own point, or the highest when none is higher (the only bear-off a die
+    // allows). Other rolls try the dice in the order shown, then the other way round, and keep the order that takes off
+    // more (the first on a tie). [] when none can come off.
+    bearOffAll() {
+      const rem = this.remaining(); if (!rem.length || this.done) return [];
+      const orders = rem.length > 1 && rem[0] !== rem[1] ? [rem, rem.slice().reverse()] : [rem];
+      let best = [];
+      for (const order of orders) {
+        const steps = [], left = order.slice();
+        for (let progress = true; progress && left.length;) {
+          progress = false;
+          for (let i = 0; i < left.length; i++) {
+            let m = null;
+            for (let f = Math.min(6, left[i]); f >= 1 && !m; f--) { const x = this.board[f] > 0 ? this.allowed(f, left[i]) : null; if (x && x.to === 0) m = x; }
+            if (!m) continue;
+            this.apply(m); steps.push(m); left.splice(i, 1); progress = true; break;
+          }
+        }
+        for (let i = 0; i < steps.length; i++) this.undo();
+        if (steps.length > best.length) best = steps;
+      }
+      return best;
+    }
     apply(m) { this.steps.push({ ...m, before: this.board }); this.board = m.board; }
     undo() { const s = this.steps.pop(); if (s) this.board = s.before; return s; }
     // Destinations for a checker that is being dragged (for highlighting).

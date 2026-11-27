@@ -202,6 +202,7 @@
   /* the cost of your decision (the user's colours, 2026-11-26): red a blunder, yellow an error, grey the rest */
   :root { --rvyel: #957100; }
   @media (prefers-color-scheme: dark) { :root { --rvyel: #f2c230; } }
+  .list td.err.blunder { color: var(--bad); } .list td.err.error { color: var(--rvyel); } .list td.err.close { color: var(--muted); }
   .rvcost { font-variant-numeric: tabular-nums; } .rvcost.blunder { color: var(--bad); } .rvcost.error { color: var(--rvyel); } .rvcost.small { color: var(--muted); font-weight: 500; }
   .mdl.played { color: #fff; background: var(--bad); border-color: var(--bad); }
   .rvtabs { display: inline-flex; max-width: 100%; vertical-align: middle; margin-bottom: 2px; } .rvtabs button { min-height: 26px !important; font-size: 12.5px; padding: 0 9px; white-space: nowrap; }

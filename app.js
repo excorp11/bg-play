@@ -593,15 +593,24 @@ async function finishER() {
 
 // ------------------------------------------------------------- board drawing
 let GEO = null;
+// Portrait (the user's request, 2026-11-27): the trays leave the side of the board and run along its bottom (yours) and
+// its top (Open Sage's), so the points get the side tray's width and your tray is a bigger target. Landscape keeps the
+// side tray.
+const portrait = () => !!(window.matchMedia && matchMedia('(orientation: portrait)').matches);
 function geometry(W, H) {
-  const m = 3, lh = Math.max(14, Math.min(20, H * 0.055));
-  const pw = (W - 2 * m) / (12 + 0.85 + 0.95), bw = pw * 0.85, tw = pw * 0.95;
-  const zt = (H - 2 * lh - 2 * m) / 10.6, r = Math.max(6, Math.min(pw * 0.47, zt * 0.5));
+  const port = portrait(), m = 3, th = port ? Math.max(24, Math.min(34, H * 0.075)) : 0, lh = Math.max(14, Math.min(20, (H - 2 * th) * 0.055));
+  const pw = (W - 2 * m) / (12 + 0.85 + (port ? 0 : 0.95)), bw = pw * 0.85, tw = port ? 0 : pw * 0.95;
+  const zt = (H - 2 * lh - 2 * m - 2 * th) / 10.6, r = Math.max(6, Math.min(pw * 0.47, zt * 0.5));
   const zh = Math.min(zt, 2 * r + 0.6), ph = zt * 5;
-  const x0 = S.set.mirror ? m + tw : m, colX = (c) => x0 + (c < 6 ? c * pw : bw + c * pw);
-  const barX = x0 + 6 * pw, trayX = S.set.mirror ? m - 2 : x0 + 12 * pw + bw, top = m + lh, bot = H - m - lh;
-  return { W, H, m, x0, lh, pw, bw, tw, zh, ph, r, colX, barX, trayX, top, bot, mid: H / 2 };
+  const x0 = S.set.mirror && !port ? m + tw : m, colX = (c) => x0 + (c < 6 ? c * pw : bw + c * pw);
+  const barX = x0 + 6 * pw, trayX = port ? null : S.set.mirror ? m - 2 : x0 + 12 * pw + bw, top = m + th + lh, bot = H - m - th - lh;
+  // portrait trays: the strip's rows (Open Sage's at the top, yours at the bottom); the slabs stack from the home side
+  const xL = x0, xR = x0 + 12 * pw + bw, sw = Math.min(13, (xR - xL - 60) / 15);
+  return { W, H, m, x0, lh, pw, bw, tw, zh, ph, r, colX, barX, trayX, top, bot, mid: H / 2, port, th, xL, xR, sw,
+    trayY: { bot: m, me: H - m - th } };
 }
+// Portrait trays: the x of the k-th borne-off slab, counted from the home side.
+const slabX = (k) => (S.set.mirror ? GEO.xL + 4 + k * GEO.sw : GEO.xR - 4 - (k + 1) * GEO.sw);
 const pointCol = (p) => { const r = p >= 13 ? { c: p - 13, top: true } : { c: 12 - p, top: false }; if (S.set.mirror) r.c = 11 - r.c; return r; };
 const colPoint = (c, isTop) => { if (S.set.mirror) c = 11 - c; return isTop ? 13 + c : 12 - c; };
 // Where the k-th checker of a stack sits. where: 1..24 a point, 'mybar' / 'botbar', 'mytray' / 'bottray'.
@@ -609,6 +618,7 @@ function spot(where, k) {
   const G = GEO, kk = Math.max(0, Math.min(4, k));
   if (where === 'mybar') return [G.barX + G.bw / 2, G.mid + barOff() + kk * G.zh * 0.55];
   if (where === 'botbar') return [G.barX + G.bw / 2, G.mid - barOff() - kk * G.zh * 0.55];
+  if (G.port && (where === 'mytray' || where === 'bottray')) return [slabX(Math.min(14, k)) + G.sw / 2, G.trayY[where === 'mytray' ? 'me' : 'bot'] + G.th / 2];
   if (where === 'mytray') return [G.trayX + 2 + (G.tw - 2) / 2, G.bot - 2 - (k + 0.5) * trSlab()];
   if (where === 'bottray') return [G.trayX + 2 + (G.tw - 2) / 2, G.top + 2 + (k + 0.5) * trSlab()];
   const { c, top } = pointCol(where);
@@ -648,15 +658,17 @@ function drawBoard() {
   let s = `<rect x="0" y="0" width="${G.W}" height="${G.H}" rx="8" fill="var(--frame)"/>`;
   s += `<rect x="${G.x0}" y="${G.top - 2}" width="${12 * G.pw + G.bw}" height="${G.bot - G.top + 4}" fill="var(--felt)"/>`;
   s += `<rect x="${G.barX}" y="${G.top - 2}" width="${G.bw}" height="${G.bot - G.top + 4}" fill="var(--frame)" opacity=".85"/>`;
-  s += `<rect x="${G.trayX + 2}" y="${G.top - 2}" width="${G.tw - 2}" height="${G.bot - G.top + 4}" fill="var(--frame)" opacity=".6"/>`;
+  if (G.port) for (const y of [G.trayY.bot, G.trayY.me]) s += `<rect x="${G.xL}" y="${y + 2}" width="${G.xR - G.xL}" height="${G.th - 4}" rx="5" fill="#000" opacity=".18"/>`;
+  else s += `<rect x="${G.trayX + 2}" y="${G.top - 2}" width="${G.tw - 2}" height="${G.bot - G.top + 4}" fill="var(--frame)" opacity=".6"/>`;
   for (let p = 1; p <= 24; p++) {
     const { c, top } = pointCol(p), x = G.colX(c), y1 = top ? G.top : G.bot, y2 = top ? G.top + G.ph : G.bot - G.ph;
     s += `<polygon points="${x + 1},${y1} ${x + G.pw - 1},${y1} ${x + G.pw / 2},${y2}" fill="${p % 2 ? 'var(--pt1)' : 'var(--pt2)'}"/>`;
-    const ly = top ? G.m + G.lh * 0.72 : G.H - G.m - G.lh * 0.22;
+    const ly = top ? G.m + G.th + G.lh * 0.72 : G.H - G.m - G.th - G.lh * 0.22;
     s += `<text x="${x + G.pw / 2}" y="${ly}" font-size="${Math.min(12, G.lh * 0.7)}" font-weight="600" text-anchor="middle" fill="#efe6d2">${p}</text>`;
   }
   if (drag && drag.targets) for (const p of drag.targets) {
-    if (p === 0) { s += `<rect x="${G.trayX + 3}" y="${G.mid + 4}" width="${G.tw - 4}" height="${G.bot - G.mid - 6}" rx="4" fill="none" stroke="var(--hint)" stroke-width="2.5" stroke-dasharray="5 4"/>`; continue; }
+    if (p === 0) { s += G.port ? `<rect x="${G.xL + 2}" y="${G.trayY.me + 3}" width="${G.xR - G.xL - 4}" height="${G.th - 6}" rx="5" fill="none" stroke="var(--hint)" stroke-width="2.5" stroke-dasharray="5 4"/>`
+      : `<rect x="${G.trayX + 3}" y="${G.mid + 4}" width="${G.tw - 4}" height="${G.bot - G.mid - 6}" rx="4" fill="none" stroke="var(--hint)" stroke-width="2.5" stroke-dasharray="5 4"/>`; continue; }
     const { c, top } = pointCol(p), x = G.colX(c), y1 = top ? G.top : G.bot, y2 = top ? G.top + G.ph : G.bot - G.ph;
     s += `<polygon points="${x + 2},${y1} ${x + G.pw - 2},${y1} ${x + G.pw / 2},${y2}" fill="var(--hint)" opacity=".38"/>`;
   }
@@ -686,6 +698,12 @@ function drawBoard() {
   const c = R.counts(b), offMe = Math.max(0, 15 - c.me - (drag && drag.lifted ? 1 : 0)), offBot = Math.max(0, 15 - c.op), tx = G.trayX + 2 + (G.tw - 2) / 2, sl = trSlab();
   const tray = (n, isTop, mine) => {
     let t = '';
+    if (G.port) {                         // a row of slabs from the home side, the count beyond the last one
+      const y = G.trayY[isTop ? 'bot' : 'me'] + 5, hh = G.th - 10;
+      for (let i = 0; i < n; i++) t += `<rect x="${slabX(i) + 0.5}" y="${y}" width="${G.sw - 1}" height="${hh}" rx="2" fill="${mine ? 'var(--me)' : 'var(--opp)'}" stroke="${mine ? 'var(--me-edge)' : 'var(--opp-edge)'}" stroke-width=".7"/>`;
+      if (n) t += `<text x="${S.set.mirror ? slabX(n) + 4 : slabX(n - 1) - 4}" y="${y + hh / 2 + 4}" font-size="11" font-weight="700" text-anchor="${S.set.mirror ? 'start' : 'end'}" fill="#efe6d2">${n}</text>`;
+      return t;
+    }
     for (let i = 0; i < n; i++) { const y = isTop ? G.top + 2 + i * sl : G.bot - 2 - (i + 1) * sl;
       t += `<rect x="${tx - G.tw * 0.34}" y="${y}" width="${G.tw * 0.68}" height="${sl - 1}" rx="1.5" fill="${mine ? 'var(--me)' : 'var(--opp)'}" stroke="${mine ? 'var(--me-edge)' : 'var(--opp-edge)'}" stroke-width=".6"/>`; }
     if (n) t += `<text x="${tx}" y="${isTop ? G.top + 2 + n * sl + 11 : G.bot - 2 - n * sl - 4}" font-size="10" font-weight="700" text-anchor="middle" fill="#efe6d2">${n}</text>`;
@@ -802,9 +820,15 @@ let drag = null;
 function hitTest(x, y) {
   const G = GEO; if (!G) return null;
   if (G.diceBox && x >= G.diceBox[0] && x <= G.diceBox[2] && y >= G.diceBox[1] && y <= G.diceBox[3]) return { kind: 'dice' };
+  if (G.port) {                            // the trays' strips run the board's whole width, across the bar too
+    if (y >= G.trayY.me) return { kind: 'tray', mine: true };
+    if (y <= G.trayY.bot + G.th) return { kind: 'tray', mine: false };
+  }
   if (x >= G.barX && x < G.barX + G.bw) return { kind: 'bar', mine: y > G.mid };
-  const trayL = S.set.mirror ? 0 : G.trayX, trayR = S.set.mirror ? G.x0 : G.W;
-  if (x >= trayL && x <= trayR) return { kind: 'tray', mine: y > G.mid };
+  if (!G.port) {
+    const trayL = S.set.mirror ? 0 : G.trayX, trayR = S.set.mirror ? G.x0 : G.W;
+    if (x >= trayL && x <= trayR) return { kind: 'tray', mine: y > G.mid };
+  }
   let c = -1;
   if (x >= G.x0 && x < G.barX) c = Math.floor((x - G.x0) / G.pw);
   else if (x >= G.barX + G.bw && x < G.barX + G.bw + 6 * G.pw) c = 6 + Math.floor((x - G.barX - G.bw) / G.pw);
@@ -841,6 +865,7 @@ async function onUp(ev) {
     const h = GEO ? hitTest(x, y) : null;
     if (h && h.kind === 'dice') tapDice();
     else if (h && h.kind === 'point') await tapMake(h.p);
+    else if (h && h.kind === 'tray' && h.mine) await tapBearOff();
     return;
   }
   const d = drag; drag = null;
@@ -868,6 +893,18 @@ async function tapMake(p) {
   if (!ms) { if (t.board[p] >= -1) toast(`No two checkers can make your ${p} point with ${t.order[0]}-${t.order[1]}`, 1600); return; }
   busy = true;
   try { for (const m of ms) { const mm = t.allowed(m.from, m.die); if (!mm) break; await animateUser(mm); t.apply(mm); syncTurn(t); drawBoard(); } }
+  finally { busy = false; }
+  save(); afterStep();
+}
+// A tap on your tray (the user's request, 2026-11-27): every checker the dice left can bear off goes off, as if each
+// had been tapped; nothing else moves.
+async function tapBearOff() {
+  if (!myTurnToMove()) return;
+  const t = getTurn(); if (!t || t.done) return;
+  const ms = t.bearOffAll();
+  if (!ms.length) { toast(R.allHome(t.board) ? `No checker can come off with ${t.remaining().join('-')}` : 'Bring all your checkers home first', 1600); return; }
+  busy = true;
+  try { for (const m of ms) { const mm = t.allowed(m.from, m.die); if (!mm || mm.to !== 0) break; await animateUser(mm); t.apply(mm); syncTurn(t); drawBoard(); } }
   finally { busy = false; }
   save(); afterStep();
 }
@@ -918,7 +955,7 @@ function renderSide() {
   const el = $('side'); if (!el) return;
   const z = $('pasteZone'); if (z && document.activeElement === z) { sideLater = true; return; }   // don't pull the box from under the finger
   const gm = S.game, v = S.ui.view;
-  let h = `<div class="bar-top"><div class="title">BG Play <span class="muted">vs Open Sage ${gm ? gm.ply : S.set.ply}-ply</span></div>${btn('⋯', 'openMenu()', 'icon', false, 'Menu')}</div>`;
+  let h = `<div class="bar-top"><div class="title">BG Play <span class="muted">vs Open Sage ${gm ? gm.ply : S.set.ply}-ply</span></div>${gm && gm.phase !== 'over' && !S.ui.view ? autoRollSwitch(gm) : ''}${btn('⋯', 'openMenu()', 'icon', false, 'Menu')}</div>`;
   h += `<div class="score">${esc(scoreLine())}</div>`;
   if (ENG.state !== 'ready') {
     h += `<div class="card"><div class="${ENG.state === 'error' ? 'bad' : 'muted'}">${esc(ENG.msg || 'Loading…')}</div>${ENG.state === 'error' ? btn('Retry', 'location.reload()') : ''}</div>`;
@@ -952,16 +989,15 @@ function gamePanel(gm) {
   } else if (gm.phase === 'over') h += overPanel(gm);
   else h += `<div class="status run">${esc(statusText || 'Open Sage is thinking…')}</div>`;
   if (S.ui.retry && gm.phase !== 'over') h += btn('Retry', 'S.ui.retry=false; drive()');
-  if (gm.phase !== 'over') h += autoRollSwitch(gm);
   if (gm.phase !== 'over' && S.set.showBot) h += botPanel(gm);
   return h;
 }
 // Auto-roll (the user's request, 2026-11-26: closed out, or a race he won't double in): while it's on, every turn of
 // yours is rolled for you, even with the cube in reach, so you can't double until you switch it off. It belongs to the
-// game, so each new game starts with it off.
+// game, so each new game starts with it off. It sits in the panel's top bar, which stays put through the game (the
+// user's request, 2026-11-27: under the turn's buttons it moved with every roll).
 function autoRollSwitch(gm) {
-  return `<label class="tog autoroll"><input type="checkbox" ${gm.autoRollOn ? 'checked' : ''} onchange="setAutoRoll(this.checked)"> Auto-roll` +
-    `<span class="muted small">${gm.autoRollOn ? 'on: every turn rolled for you, no doubling' : 'roll every turn for me'}</span></label>`;
+  return `<label class="tog autoroll${gm.autoRollOn ? ' on' : ''}" title="${gm.autoRollOn ? 'On: every turn rolled for you, no doubling' : 'Roll every turn for me (no doubling while on)'}"><input type="checkbox" ${gm.autoRollOn ? 'checked' : ''} onchange="setAutoRoll(this.checked)"> Auto-roll</label>`;
 }
 function setAutoRoll(on) {
   const gm = S.game; if (!gm || gm.phase === 'over') return;
