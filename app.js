@@ -42,41 +42,61 @@ function load() {
 
 // ------------------------------------------------------------- engine: a pool of workers with two priorities
 class Pool {
-  constructor(n) { this.n = n; this.workers = []; this.idle = []; this.hi = []; this.lo = []; this.bg = []; this.ro = []; this.roRun = 0; this.roIds = new Set(); this.cbs = {}; this.seq = 0; }
+  constructor(n) { this.n = n; this.workers = []; this.idle = []; this.hi = []; this.lo = []; this.bg = []; this.ro = []; this.roRun = 0; this.roIds = new Set(); this.cbs = {}; this.seq = 0; this.extra = []; this.adding = null; this.dead = false; }
+  make() {
+    const w = new Worker('worker.js');
+    w.onmessage = (ev) => {
+      const m = ev.data, cb = this.cbs[m.id]; delete this.cbs[m.id];
+      if (this.roIds.delete(m.id)) this.roRun--;
+      if (w.gone) this.retire(w); else if (!this.idle.includes(w)) this.idle.push(w);
+      this.pump(); if (cb) cb(m);
+    };
+    w.onerror = (e) => { console.error('worker error', e.message); };
+    this.workers.push(w); return w;
+  }
+  boot(w) { return new Promise((res) => { const id = ++this.seq; this.cbs[id] = res; w.postMessage({ id, cmd: 'init', weights: this.weights.slice(0), manifest: this.manifest }); }); }
   async init(weights, manifest) {
-    const inits = [];
-    for (let i = 0; i < this.n; i++) {
-      const w = new Worker('worker.js');
-      w.onmessage = (ev) => {
-        const m = ev.data, cb = this.cbs[m.id]; delete this.cbs[m.id];
-        if (this.roIds.delete(m.id)) this.roRun--;
-        if (!this.idle.includes(w)) this.idle.push(w);
-        this.pump(); if (cb) cb(m);
-      };
-      w.onerror = (e) => { console.error('worker error', e.message); };
-      this.workers.push(w);
-      inits.push(new Promise((res) => { const id = ++this.seq; this.cbs[id] = res; w.postMessage({ id, cmd: 'init', weights: weights.slice(0), manifest }); }));
-    }
-    const rs = await Promise.all(inits);
+    this.weights = weights; this.manifest = manifest;
+    const rs = await Promise.all(Array.from({ length: this.n }, () => this.boot(this.make())));
     for (const r of rs) if (!r.ok) throw new Error(r.error);
   }
+  // Extra workers that take only Progress's rollouts (the copy of the tile doing them, on a computer with cores to spare:
+  // see PG); dropExtra lets them go (a busy one when its job ends).
+  addRo(k) {
+    if (this.adding || k < 1 || this.dead) return this.adding || Promise.resolve(0);
+    return (this.adding = (async () => {
+      const ws = Array.from({ length: k }, () => { const w = this.make(); w.roOnly = true; this.extra.push(w); return w; });
+      const rs = await Promise.all(ws.map((w) => this.boot(w)));
+      ws.forEach((w, i) => { if (!rs[i].ok) this.retire(w); });
+      return this.extra.length;
+    })().finally(() => { this.adding = null; }));
+  }
+  dropExtra() { for (const w of this.extra.slice()) { if (this.idle.includes(w)) this.retire(w); else w.gone = true; } }
+  retire(w) { w.terminate(); this.idle = this.idle.filter((x) => x !== w); this.workers = this.workers.filter((x) => x !== w); this.extra = this.extra.filter((x) => x !== w); }
+  // Rollouts waiting for a worker end as 'cancelled' (another copy of the tile has taken them over).
+  cancelRo() { const q = this.ro; this.ro = []; q.forEach(([, res]) => res({ ok: false, error: 'cancelled' })); }
   // Four queues: hi (Open Sage's moves, what you wait for), lo (your decisions' analysis while you think), bg (progress
   // tracking, only when nothing else waits), ro (Progress's rollouts: long jobs, so they never take every worker; see roCap).
   run(msg, prio) { return new Promise((res) => { (prio === 'lo' ? this.lo : prio === 'bg' ? this.bg : prio === 'ro' ? this.ro : this.hi).push([msg, res]); this.pump(); }); }
   all(msg) { return Promise.all(this.workers.map((w) => new Promise((res) => { this.idle = this.idle.filter((x) => x !== w); const id = ++this.seq; this.cbs[id] = res; w.postMessage({ ...msg, id }); }))); }
+  send(w, [msg, res], ro) { const id = ++this.seq; if (ro) { this.roRun++; this.roIds.add(id); } this.cbs[id] = res; w.postMessage({ ...msg, id }); }
   pump() {
-    while (this.idle.length) {
+    for (let i = 0; i < this.idle.length && this.ro.length;) {          // the extra workers: rollouts only, first
+      const w = this.idle[i]; if (!w.roOnly) { i++; continue; }
+      this.idle.splice(i, 1); this.send(w, this.ro.shift(), false);
+    }
+    for (let i = 0; i < this.idle.length;) {
+      const w = this.idle[i]; if (w.roOnly) { i++; continue; }
       let q = this.hi.length ? this.hi : this.lo.length ? this.lo : this.bg.length ? this.bg : null, ro = false;
       if (!q && this.ro.length && this.roRun < roCap(this.n)) { q = this.ro; ro = true; }
       if (!q) break;
-      const w = this.idle.shift(), [msg, res] = q.shift(), id = ++this.seq;
-      if (ro) { this.roRun++; this.roIds.add(id); }
-      this.cbs[id] = res; w.postMessage({ ...msg, id });
+      this.idle.splice(i, 1); this.send(w, q.shift(), ro);
     }
   }
   // Stops the workers; every job queued or running ends as 'cancelled' (callers redo it after a restart).
   terminate() {
-    this.workers.forEach((w) => w.terminate()); [...this.hi, ...this.lo, ...this.bg, ...this.ro].forEach(([, res]) => res({ ok: false, error: 'cancelled' })); this.hi = []; this.lo = []; this.bg = []; this.ro = []; this.roRun = 0; this.roIds.clear();
+    this.dead = true;
+    this.workers.forEach((w) => w.terminate()); [...this.hi, ...this.lo, ...this.bg, ...this.ro].forEach(([, res]) => res({ ok: false, error: 'cancelled' })); this.hi = []; this.lo = []; this.bg = []; this.ro = []; this.roRun = 0; this.roIds.clear(); this.extra = [];
     const cbs = this.cbs; this.cbs = {}; Object.values(cbs).forEach((cb) => cb({ ok: false, error: 'cancelled' }));
   }
 }
@@ -1764,6 +1784,8 @@ function boot() {
     window.claude.use('db').then((x) => { CAP.db = x; if (x) { flushQueue(); watchReviews(); if (window.PG) PG.setDb(x); if (window.BQ) BQ.setDb(x); } }).catch(() => {});
     window.claude.use('mcp').then((x) => { CAP.mcp = x; }).catch(() => {});
     window.claude.use('downloads').then((x) => { CAP.dl = x; }).catch(() => {});
-  }
+    // the room: who has the tile open right now, so the rollouts go to the fastest copy (PG)
+    window.claude.use('room').then((x) => { if (window.PG) PG.setRoom(x); }).catch(() => { if (window.PG) PG.setRoom(null); });
+  } else if (TARGET === 'tile' && window.PG) PG.setRoom(null);
 }
 boot();

@@ -167,7 +167,9 @@
   }
   // Works through the queue in the engine's background priority (after Open Sage's moves and your ER).
   async function kick() {
-    if (TARGET !== 'tile' || TR.busy) return;
+    if (TARGET !== 'tile') return;
+    if (!DV.per) dvBench(); dvPresence();                // the engine may have just started (see DV)
+    if (TR.busy) return;
     if (!TR.q.length) return roKick();
     if (ENG.state !== 'ready' || !ENG.pool) return;
     TR.busy = true; paint();
@@ -306,8 +308,8 @@
   // best and every play within 0.08 at truncated3 (360 games each, about XG Roller++; one seed for all, so the plays meet
   // the same dice), a cube decision in 4 parts of 108 games. Turns 1-2 keep the XG book (XG's own rollouts), races and
   // bear-offs 4-ply. When a game is done, its record takes the rolled-out costs (the 4-ply cost stays as c4, not shown) and
-  // lvl 'ro'; until then Progress shows its 4-ply figures. Newest games first; only while the tile is open; a game cut
-  // short carries on from its last decision (kept in the browser).
+  // lvl 'ro'; until then Progress shows its 4-ply figures. Newest games first, while the tile is open (with it open on more
+  // than one device, on the fastest: see DV); a game cut short carries on from its last decision (kept in the browser).
   const RO = { busy: false, cur: null, left: 0, n: +window.BGP_RO_N || 360, cubeN: +window.BGP_RO_CUBEN || 432, preset: 3, cache: {} };   // (tests set fewer games)
   const RO_KEY = 'bgplay-ro', WIDE = 0.08, RO_MAX = 6, NOCONTACT = new Set(['race', 'bearoff']);
   try { RO.cache = JSON.parse(localStorage.getItem(RO_KEY) || '{}') || {}; } catch (e) { RO.cache = {}; }
@@ -317,17 +319,18 @@
   const roList = () => [...TR.docs.values()].filter(roPending).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   async function roKick() {
     if (TARGET !== 'tile' || RO.busy || TR.busy || TR.q.length || !TR.loaded || ENG.state !== 'ready' || !ENG.pool || RO.off || window.BGP_NO_ROLLOUT) return;
+    if (!dvMine()) return;                               // another copy of the tile does them (see DV below)
     let list = roList(); if (!list.length) return;
-    RO.busy = true; RO.left = list.length; paint();
+    RO.busy = true; RO.yield = false; RO.left = list.length; dvExtra(); paint();
     try {
-      while (list.length && ENG.state === 'ready' && ENG.pool && !TR.q.length) {
+      while (list.length && ENG.state === 'ready' && ENG.pool && !TR.q.length && !RO.yield) {
         RO.cur = { id: list[0].id, done: 0, n: 0 }; paint();
         const rec = await roRecord(list[0]);
-        if (!rec) break;                                   // the engine stopped (a review opened): carried on after the restart
+        if (!rec) break;                                   // the engine stopped (a review opened), or another copy took over
         await store(rec);
         list = roList(); RO.left = list.length; paint();
       }
-    } finally { RO.busy = false; RO.cur = null; paint(); }
+    } finally { RO.busy = false; RO.cur = null; RO.yield = false; RO.last = Date.now(); paint(); }
   }
   async function roRecord(r) {
     const want = r.decs.filter(roWants), done = RO.cache[r.id] || (RO.cache[r.id] = {}), now = () => new Date().toISOString();
@@ -339,17 +342,24 @@
       } catch (e) { delete RO.cache[r.id]; roSave(); return { ...r, lvl: 'ro', ro: { at: now(), n: 0, err: String(e.message || e).slice(0, 120) } }; }
     }
     RO.cur.n = want.length; RO.cur.done = want.filter((x) => done[x.t + ':' + x.k]).length; paint();
-    for (const old of want) {
-      const key = old.t + ':' + old.k; if (done[key]) continue;
-      const d = mine.find((x) => x.turn === old.t && x.k === old.k);
+    // A decision has 2-6 rollouts, so a copy with more workers (a computer, see dvExtra) works on a few at once: about
+    // one decision per 3 rollouts it may run. The engine stopping (a review opened) or another copy taking over (RO.yield)
+    // ends the pass; the decisions done stay in the browser for next time.
+    const todo = want.filter((x) => !done[x.t + ':' + x.k]), P = ENG.pool, lanes = Math.max(1, Math.round(((P ? roCap(P.n) + P.extra.length : 1)) / 3));
+    RO.lanes = lanes;
+    let halt = false;
+    const one = async (old) => {
+      const key = old.t + ':' + old.k, d = mine.find((x) => x.turn === old.t && x.k === old.k);
       let res = null;
-      if (d) { try { res = d.k === 'M' ? await roPlay(d) : await roCube(d); } catch (e) { if (stopped(e)) return null; res = 'keep'; } }
-      if (!res) { if (!ENG.pool || ENG.state !== 'ready') return null; res = 'keep'; }
+      if (d) { try { res = d.k === 'M' ? await roPlay(d) : await roCube(d); } catch (e) { if (stopped(e)) { halt = true; return; } res = 'keep'; } }
+      if (!res) { if (!ENG.pool || ENG.state !== 'ready') { halt = true; return; } res = 'keep'; }
       let o = null;
       if (res !== 'keep') { d.res = res; o = decRec(d); }
       done[key] = o ? { ...o, n: 1, ...(old.w ? { w: old.w } : {}), c4: old.c, ro: 1 } : { ...old };   // a decision that can't be rolled out keeps 4-ply
       roSave(); RO.cur.done++; paint();
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(lanes, todo.length) }, async () => { while (todo.length && !halt && !RO.yield) await one(todo.shift()); }));
+    if (halt || RO.yield || want.some((x) => !done[x.t + ':' + x.k])) return null;
     const decs = r.decs.map((x) => done[x.t + ':' + x.k] || x);
     delete RO.cache[r.id]; roSave();
     return { ...r, decs, you: sumsRec(decs), lvl: 'ro', ro: { at: now(), n: want.length, games: RO.n, cube: RO.cubeN } };
@@ -412,6 +422,114 @@
     if (!recs.length || recs.some((r) => !r || r.lvl !== 'ro')) return null;
     const n = recs.reduce((a, r) => a + r.you.n, 0), lost = recs.reduce((a, r) => a + r.you.lost, 0);
     return { er: n ? (lost * 500) / n : 0, n, total: lost };
+  }
+
+  // ------------------------------------------------------------- devices (the user's request, 2026-11-28)
+  // With the tile open on more than one device (a computer and a phone, say), the rollouts go to the fastest. Each copy
+  // keeps its state in the room's presence (who has the page open right now; nothing is stored): the device, how fast it
+  // rolls out (a short test rollout when its engine starts, times the rollouts it can run at once), whether it is ready,
+  // and the game it is rolling out. Only the fastest ready copy rolls out; the others leave the rollouts to it (one in
+  // the middle of a game stops, its finished decisions kept in that browser) and say where they are going. When that
+  // copy closes, or goes quiet for 3 minutes (a computer asleep), the next fastest takes over; one that was ready in the
+  // last 2 minutes keeps its turn (a review open on it, say). The 4-ply records stay with the device a game was played
+  // on. Without the room (no connection) each copy rolls out on its own, as before. On a computer, the copy rolling out
+  // adds workers that take only rollouts, up to 8 at once with two cores left over, and lets them go 2 minutes after.
+  const PROTO = 1, BEAT = +window.BGP_DV_BEAT || 30000, STALE = +window.BGP_DV_STALE || 180000, GRACE = 120000,
+    SETTLE = +window.BGP_DV_SETTLE || 3000, RO_THREADS = 8, EXTRA_IDLE = +window.BGP_RO_IDLE || 120000;   // (tests set shorter times)
+  const DV = { room: null, solo: false, wait: true, me: '', t0: 0, peers: [], seen: new Map(), per: 0, fails: 0, bench: null, beat: 0, pres: '', st: '', label: devLabel() };
+  DV.mob = /iPhone|iPad|Android/.test(DV.label);
+  function devLabel() {
+    const ua = navigator.userAgent || '';
+    if (/iPhone|iPod/.test(ua)) return 'iPhone';
+    if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'iPad';
+    if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'Android phone' : 'Android tablet';
+    if (/Mac OS X|Macintosh/.test(ua)) return 'Mac';
+    if (/Windows/.test(ua)) return 'Windows PC';
+    if (/CrOS/.test(ua)) return 'Chromebook';
+    if (/Linux/.test(ua)) return 'Linux computer';
+    return 'other device';
+  }
+  function setRoom(room) {
+    if (TARGET !== 'tile' || DV.room) return;
+    if (!room || typeof room.presence !== 'function' || typeof room.peers !== 'function') { if (DV.wait) dvSolo(); return; }
+    DV.room = room; DV.wait = false; DV.solo = false; DV.t0 = 0;
+    try { room.onPeers(() => dvUpdate(), () => dvSolo()); } catch (e) { dvSolo(); return; }
+    dvPresence(); dvBench();
+    setInterval(() => { if (!DV.room) return; DV.beat++; dvUpdate(); dvPresence(); }, BEAT);   // a beat: the others see this copy is alive
+    setTimeout(() => { if (DV.room && !DV.me) dvSolo(); }, 20000);                              // the room never answered
+  }
+  function dvSolo() { DV.wait = false; DV.solo = true; DV.room = null; DV.peers = []; paint(); roKick(); }
+  // The other copies open now (any device of yours; a guest's copy never), each heard from in the last 3 minutes.
+  function dvPeers() {
+    let list = []; try { list = DV.room.peers() || []; } catch (e) { list = []; }
+    const now = Date.now(), out = [];
+    for (const p of list) {
+      if (!p) continue;
+      if (p.sameTab) { DV.me = String(p.peer); continue; }
+      const x = p.presence || {};
+      if (p.kind !== 'viewer' || p.isMe === false || p.guest || x.bgp !== PROTO || now - (+p.updatedAt || 0) > STALE) continue;
+      const s = DV.seen.get(p.peer) || {}; if (x.ok) s.ok = now; DV.seen.set(p.peer, s);
+      out.push({ peer: String(p.peer), label: String(x.dev || 'other device').slice(0, 30), sc: +x.sc || 0, ok: !!x.ok, ready: !!x.ok || !!(s.ok && now - s.ok < GRACE),
+        cur: typeof x.cur === 'string' ? x.cur.slice(0, 80) : '', d: +x.d || 0, nd: +x.nd || 0 });
+    }
+    DV.peers = out;
+    if (DV.me && !DV.t0) DV.t0 = now;
+  }
+  const dvOk = () => !RO.off && !window.BGP_NO_ROLLOUT && ENG.state === 'ready' && !!ENG.pool && TR.loaded && DV.per > 0;
+  // Rollouts this copy can run at once when it's free: its workers but one, or on a computer up to 8 with extra workers.
+  const dvTarget = () => (DV.mob ? 0 : Math.min(RO_THREADS, (navigator.hardwareConcurrency || 2) - 2));
+  const dvThreads = () => Math.max(1, (ENG.pool ? ENG.pool.n : S.set.workers) - 1, dvTarget());
+  const dvScore = () => r3(DV.per * dvThreads() * (+window.BGP_DEV_SPEED || 1));
+  const dvSettled = () => !!(DV.room && DV.me && DV.t0 && Date.now() - DV.t0 >= SETTLE);
+  // The fastest copy that's ready (this one included), or null.
+  function dvLeader() {
+    const c = DV.peers.filter((p) => p.ready && p.sc > 0);
+    if (dvOk()) c.push({ peer: DV.me, label: DV.label, sc: dvScore(), me: true });
+    c.sort((a, b) => b.sc - a.sc || (a.peer < b.peer ? -1 : a.peer > b.peer ? 1 : 0));
+    return c[0] || null;
+  }
+  // May this copy roll out? On its own, or when it is the fastest ready copy (once the room has had time to answer).
+  const dvMine = () => DV.solo || (!DV.wait && dvSettled() && !!(dvLeader() || {}).me);
+  // The copy that rolls out instead of this one, if another does.
+  function dvOther() { if (DV.solo || !dvSettled()) return null; const L = dvLeader(); return L && !L.me ? L : null; }
+  function dvUpdate() {
+    if (!DV.room) return;
+    dvPeers();
+    if (RO.busy && !RO.yield && dvOther()) { RO.yield = true; if (ENG.pool) ENG.pool.cancelRo(); }   // a faster copy takes over
+    else if (!RO.busy) roKick();
+    if (!DV.per) dvBench();
+    const st = statusLine(); if (st !== DV.st) { DV.st = st; paint(); }
+  }
+  function dvPresence() {
+    if (!DV.room) return;
+    const c = RO.busy && RO.cur ? RO.cur : null;
+    const x = { bgp: PROTO, dev: DV.label, sc: DV.per ? dvScore() : 0, ok: dvOk() ? 1 : 0, cur: c ? c.id : null, d: c ? c.done : 0, nd: c ? c.n : 0, beat: DV.beat };
+    const s = JSON.stringify(x); if (s === DV.pres) return; DV.pres = s;
+    try { Promise.resolve(DV.room.presence(x)).catch(() => {}); } catch (e) { /* the room has gone: dvSolo follows */ }
+  }
+  // How fast this copy rolls out: a short rollout (18 games at truncated3 from an opening position) on up to 3 workers at
+  // once, timed in the workers (games a second per worker).
+  const BENCH = [0, -2, 0, 0, 0, 2, 4, 0, 2, 0, 0, 0, -5, 5, 0, 0, 0, -3, 0, -5, 0, 0, 0, 0, 2, 0], BENCH_G = { cv: 1, co: 0, jac: 1, bea: 1, a1: 0, a2: 0, cr: 0 };
+  function dvBench() {
+    if (DV.per || DV.bench || DV.solo || !DV.room || ENG.state !== 'ready' || !ENG.pool) return;
+    const P = ENG.pool, k = Math.max(1, Math.min(3, P.n - 1)), n = +window.BGP_BENCH_N || 18;
+    DV.bench = Promise.all(Array.from({ length: k }, () => P.run({ cmd: 'rollPlay', post: BENCH, preset: RO.preset, n, seed: 7, g: BENCH_G }, 'lo')))
+      .then((rs) => {
+        const sp = rs.filter((r) => r && r.ok && r.ms > 0).map((r) => n / (r.ms / 1000));
+        if (sp.length) DV.per = sp.reduce((a, x) => a + x, 0) / sp.length; else if (++DV.fails >= 2) DV.per = 1e-6;   // still a copy that can roll out
+      })
+      .catch(() => {}).finally(() => { DV.bench = null; if (DV.per) { dvPresence(); dvUpdate(); } });
+  }
+  // The copy rolling out, on a computer: extra workers for the rollouts (see Pool.addRo), up to 8 rollouts at once.
+  function dvExtra() {
+    const P = ENG.pool; if (!P || P.adding) return;
+    const k = Math.max(0, dvTarget() - Math.max(1, P.n - 1)) - P.extra.length;
+    if (k > 0) P.addRo(k).catch(() => {});
+  }
+  // The other open copies, for the Progress screen: "your iPhone", "your Mac (2 windows)".
+  function dvAlso() {
+    const m = new Map(); for (const p of DV.peers) m.set(p.label, (m.get(p.label) || 0) + 1);
+    return [...m].map(([l, n]) => esc(l) + (n > 1 ? ` (${n} windows)` : '')).join(' and ');
   }
 
   // ------------------------------------------------------------- the database
@@ -544,7 +662,8 @@
     const n = TR.q.reduce((a, x) => a + (x.ids ? x.ids.filter((id) => !tracked(id)).length : 1), 0);
     if (TR.dbErr) return `<span class="bad">The progress records can't be read here: ${esc(TR.dbErr)}</span>`;
     if (n) return `<span class="run">Adding ${plural(n, 'game')} to your progress${ENG.state === 'ready' ? '' : ' (when the engine is free)'}…</span>`;
-    const left = all().filter(roPending).length;
+    const left = all().filter(roPending).length, L = left ? dvOther() : null;
+    if (L) return `<span class="run">Rolling out your close decisions on your ${esc(L.label)}: ${plural(left, 'game')} to go${L.cur && L.nd ? ` (this one ${Math.min(L.d, L.nd)} of ${L.nd})` : ''}…</span>`;
     if (left) return `<span class="run">Rolling out your close decisions: ${plural(left, 'game')} to go${RO.cur && RO.cur.n ? ` (this one ${RO.cur.done} of ${RO.cur.n})` : ''}${ENG.state === 'ready' ? '' : ', when the engine is free'}…</span>`;
     if (TR.err) return `<span class="bad">${esc(TR.err)}</span>`;
     return '';
@@ -560,6 +679,7 @@
   const isOpen = () => { const ov = $('progOv'); return !!(ov && ov.classList.contains('open')); };
   // Redraws the tab when it's open (keeping its scroll), else the end-of-game panel's progress line.
   function paint() {
+    dvPresence();                                       // the other open copies see this one's state (sent only when it changes)
     if (S.ui.menu === 'imported' && typeof renderMenu === 'function') renderMenu();     // a paste's summary: games added
     if (!isOpen()) { if (typeof renderSide === 'function' && S.game && S.game.phase === 'over') renderSide(); return; }
     const ov = $('progOv'), body = ov.querySelector('.pgbody'), top = body ? body.scrollTop : 0;
@@ -619,6 +739,10 @@
     h += `<p class="muted small">${notes[m.k]}</p>`;
     const nRo = recs.filter((r) => r.lvl === 'ro').length;
     h += `<p class="muted small">Your costs: rolled out (Open Sage truncated rollouts, 360 games a play, about XG Roller++) where the decision was close or your play wasn't the best, once a game's rollout is done (${nRo} of ${plural(recs.length, 'game')} so far); otherwise ${ER_PLY}-ply, and turns 1-2 from the XG opening book. The opponent's stay at ${ER_PLY}-ply.</p>`;
+    if (!DV.solo && DV.peers.length) {
+      const L = dvSettled() ? dvLeader() : null;
+      h += `<p class="muted small">The tile is also open on your ${dvAlso()}. Rollouts go to the fastest copy that's ready${L ? `: ${L.me ? `this one (${esc(DV.label)})` : `your ${esc(L.label)}`}` : ''}.</p>`;
+    }
     // monthly
     const months = new Map(); for (const r of recs) { const k = r.at.slice(0, 7); if (!months.has(k)) months.set(k, []); months.get(k).push(r); }
     h += `<h2>By month</h2><div class="tscroll"><table class="pt"><tr><th>Month</th><th class="w">Games</th><th class="w">Decisions</th><th>PR</th><th>Checker</th><th>Cube</th><th>Errors /100</th><th>Blunders /100</th><th>Best</th></tr>`;
@@ -771,6 +895,8 @@
     if (TARGET !== 'tile') return '';
     const M = M0 || S.match, id = recIdOf(gm, M), r = TR.docs.get(id);
     if (r && r.lvl === 'ro') return 'Added to your progress, rolled out.';
+    const L = tracked(id) ? dvOther() : null;
+    if (L) return `Added to your progress at 4-ply; rolled out next on your ${L.label}.`;      // plain text (the panel escapes it)
     return tracked(id) ? 'Added to your progress at 4-ply; rolled out next.' : gm.er ? 'Adding to your progress…' : 'Added to your progress once your ER is ready.';
   }
   let cssDone = false;
@@ -824,9 +950,13 @@
   function init() {
     load();
     if (TARGET !== 'tile') return;
-    setInterval(() => { if (!TR.busy && TR.q.length) kick(); else roKick(); if (TR.out.length) flush(); if (ENG.pool) ENG.pool.pump(); }, 15000);
+    setTimeout(() => { if (DV.wait) dvSolo(); }, 25000);           // no word from the room: on its own
+    setInterval(() => {
+      if (!TR.busy && TR.q.length) kick(); else roKick(); if (TR.out.length) flush();
+      const P = ENG.pool; if (P) { P.pump(); if (P.extra.length && !RO.busy && Date.now() - (RO.last || 0) > EXTRA_IDLE) P.dropExtra(); }
+    }, 15000);
     let rz = 0; window.addEventListener('resize', () => { if (!isOpen()) return; cancelAnimationFrame(rz); rz = requestAnimationFrame(hookChart); });   // turning the phone: the chart takes the new width
   }
   window.PG = { init, setDb, kick, gameOver, keepMatch, enqueueFile, scan, open, close, setView, metric, vals: (o) => { TR.view.vals = !!o; }, review, endState, isTracked: tracked, posType, TYPES, KINDS, COL, METRICS,
-    recOf, costsFor, erOf, _state: TR, _ro: RO, _roWants: roWants, _roKick: roKick, _agg: agg, _series: seriesOf, _metricOf: metricOf, _record: record, _fileGames: fileGames };
+    recOf, costsFor, erOf, setRoom, _dv: DV, _dvLeader: dvLeader, _dvMine: dvMine, _dvOther: dvOther, _state: TR, _ro: RO, _roWants: roWants, _roKick: roKick, _agg: agg, _series: seriesOf, _metricOf: metricOf, _record: record, _fileGames: fileGames };
 })();
