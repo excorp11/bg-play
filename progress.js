@@ -167,7 +167,8 @@
   }
   // Works through the queue in the engine's background priority (after Open Sage's moves and your ER).
   async function kick() {
-    if (TARGET !== 'tile' || TR.busy || !TR.q.length) return;
+    if (TARGET !== 'tile' || TR.busy) return;
+    if (!TR.q.length) return roKick();
     if (ENG.state !== 'ready' || !ENG.pool) return;
     TR.busy = true; paint();
     try {
@@ -189,6 +190,7 @@
         TR.q.shift(); persist();
       }
     } finally { TR.busy = false; TR.cur = null; paint(); }
+    if (!TR.q.length) roKick();
   }
 
   // ------------------------------------------------------------- scoring a game
@@ -298,6 +300,120 @@
       decs: mine.map(decRec).filter(Boolean) };
   }
 
+  // ------------------------------------------------------------- rollout level (the user's request, 2026-11-28)
+  // Your decisions only. Once a game has its 4-ply record, the decisions where a rollout can change the cost (your play
+  // wasn't the 4-ply best, or another play came within 0.08; every counted cube decision) are rolled out: your play, the
+  // best and every play within 0.08 at truncated3 (360 games each, about XG Roller++; one seed for all, so the plays meet
+  // the same dice), a cube decision in 4 parts of 108 games. Turns 1-2 keep the XG book (XG's own rollouts), races and
+  // bear-offs 4-ply. When a game is done, its record takes the rolled-out costs (the 4-ply cost stays as c4, not shown) and
+  // lvl 'ro'; until then Progress shows its 4-ply figures. Newest games first; only while the tile is open; a game cut
+  // short carries on from its last decision (kept in the browser).
+  const RO = { busy: false, cur: null, left: 0, n: +window.BGP_RO_N || 360, cubeN: +window.BGP_RO_CUBEN || 432, preset: 3, cache: {} };   // (tests set fewer games)
+  const RO_KEY = 'bgplay-ro', WIDE = 0.08, RO_MAX = 6, NOCONTACT = new Set(['race', 'bearoff']);
+  try { RO.cache = JSON.parse(localStorage.getItem(RO_KEY) || '{}') || {}; } catch (e) { RO.cache = {}; }
+  const roSave = () => { try { localStorage.setItem(RO_KEY, JSON.stringify(RO.cache)); } catch (e) { /* redone next time */ } };
+  const roWants = (d) => !!(d.n && d.t > 2 && !NOCONTACT.has(d.pt) && (d.k !== 'M' || d.c >= 0.0005 || (d.g != null && d.g < WIDE)));
+  const roPending = (r) => !!(r && r.v === V && r.lvl !== 'ro' && r.ev && Array.isArray(r.decs));
+  const roList = () => [...TR.docs.values()].filter(roPending).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  async function roKick() {
+    if (TARGET !== 'tile' || RO.busy || TR.busy || TR.q.length || !TR.loaded || ENG.state !== 'ready' || !ENG.pool || RO.off || window.BGP_NO_ROLLOUT) return;
+    let list = roList(); if (!list.length) return;
+    RO.busy = true; RO.left = list.length; paint();
+    try {
+      while (list.length && ENG.state === 'ready' && ENG.pool && !TR.q.length) {
+        RO.cur = { id: list[0].id, done: 0, n: 0 }; paint();
+        const rec = await roRecord(list[0]);
+        if (!rec) break;                                   // the engine stopped (a review opened): carried on after the restart
+        await store(rec);
+        list = roList(); RO.left = list.length; paint();
+      }
+    } finally { RO.busy = false; RO.cur = null; paint(); }
+  }
+  async function roRecord(r) {
+    const want = r.decs.filter(roWants), done = RO.cache[r.id] || (RO.cache[r.id] = {}), now = () => new Date().toISOString();
+    let mine = [];
+    if (want.length) {
+      try {
+        const ev = typeof r.ev.events === 'string' ? JSON.parse(r.ev.events) : r.ev.events;
+        mine = decisionsOf(R.replayGames({ games: [{ n: r.ev.n || 1, score: r.ev.score, crawford: !!r.ev.crawford, events: ev }] }, r.rules, { botNoDoubles: true })[0]);
+      } catch (e) { delete RO.cache[r.id]; roSave(); return { ...r, lvl: 'ro', ro: { at: now(), n: 0, err: String(e.message || e).slice(0, 120) } }; }
+    }
+    RO.cur.n = want.length; RO.cur.done = want.filter((x) => done[x.t + ':' + x.k]).length; paint();
+    for (const old of want) {
+      const key = old.t + ':' + old.k; if (done[key]) continue;
+      const d = mine.find((x) => x.turn === old.t && x.k === old.k);
+      let res = null;
+      if (d) { try { res = d.k === 'M' ? await roPlay(d) : await roCube(d); } catch (e) { if (stopped(e)) return null; res = 'keep'; } }
+      if (!res) { if (!ENG.pool || ENG.state !== 'ready') return null; res = 'keep'; }
+      let o = null;
+      if (res !== 'keep') { d.res = res; o = decRec(d); }
+      done[key] = o ? { ...o, n: 1, ...(old.w ? { w: old.w } : {}), c4: old.c, ro: 1 } : { ...old };   // a decision that can't be rolled out keeps 4-ply
+      roSave(); RO.cur.done++; paint();
+    }
+    const decs = r.decs.map((x) => done[x.t + ':' + x.k] || x);
+    delete RO.cache[r.id]; roSave();
+    return { ...r, decs, you: sumsRec(decs), lvl: 'ro', ro: { at: now(), n: want.length, games: RO.n, cube: RO.cubeN } };
+  }
+  // A checker play: the 4-ply ranking again (the record keeps only the costs), then the plays that matter rolled out.
+  async function roPlay(d) {
+    const rk = await moveRank(d, 'ro');
+    if (!rk || rk.plays.length < 2) return null;
+    const top = rk.top, best = top[0], at3 = rk.plays.filter((p) => p.e[3] != null).sort((a, b) => b.e[3] - a.e[3]), pick = [];
+    const add = (p) => { if (p && !pick.includes(p)) pick.push(p); };
+    add(best); add(rk.plays.find((p) => R.same(p.b, d.after)));
+    for (const p of top) if (best.e[rk.depth] - p.e[rk.depth] <= WIDE && pick.length < RO_MAX) add(p);
+    for (const p of at3) if (at3[0].e[3] - p.e[3] <= WIDE && pick.length < RO_MAX) add(p);
+    const out = await Promise.all(pick.map((p) => job({ cmd: 'rollPlay', post: p.b, preset: RO.preset, n: RO.n, seed: 1, g: d.g }, 'ro')));
+    const rows = pick.map((p, i) => ({ b: p.b, e: out[i].e, se: out[i].se, name: R.notation(d.board, p.b, d.dice[0], d.dice[1]) })).sort((a, b) => b.e - a.e);
+    const played = rows.find((x) => R.same(x.b, d.after));
+    return { cost: Math.max(0, rows[0].e - played.e), counted: true, best: rows[0].name, bestB: rows[0].b, src: 'rollout', cands: rows, playedE: played.e, n: rk.plays.length, ply: 'ro' };
+  }
+  // A cube decision (the doubler's board, as at 4-ply): no double and double/take rolled out; double/pass is +1.
+  async function roCube(d) {
+    const parts = 4, per = Math.max(36, Math.round(RO.cubeN / parts / 36) * 36);
+    const out = await Promise.all(Array.from({ length: parts }, (_, i) => job({ cmd: 'rollCube', board: d.board, preset: RO.preset, n: per, seed: 1 + i * 7919, g: d.g }, 'ro')));
+    const mean = (k) => out.reduce((a, o) => a + o[k], 0) / out.length, nd = mean('nd'), dt = mean('dt');
+    const probs = [0, 1, 2, 3, 4].map((i) => out.reduce((a, o) => a + o.p[i], 0) / out.length);
+    const beav = !d.g.a1 && !!d.g.bea && d.g.co !== 2 && dt < 0;          // as the analyzer: a beaver doubles the take's value
+    const res = cubeRes(d, { equity_nd: nd, equity_dt: beav ? 2 * dt : dt, equity_dp: 1, is_beaver: beav, probs }, 'ro');
+    res.counted = true; res.why = '';                       // counted at 4-ply, so it stays counted
+    return res;
+  }
+  // A record's totals from its decisions (as sums, from the stored costs).
+  function sumsRec(decs) {
+    const s = { n: 0, nM: 0, nC: 0, lost: 0, lostM: 0, lostC: 0, err: 0, blun: 0, best: 0, crit: 0, critBest: 0 };
+    for (const d of decs) {
+      if (!d.n) continue;
+      const c = Math.max(0, +d.c || 0), band = bandOf(c);
+      s.n++; s.lost += c; if (d.k === 'M') { s.nM++; s.lostM += c; } else { s.nC++; s.lostC += c; }
+      if (band === 'blunder') s.blun++; else if (band === 'error') s.err++; else if (band === 'best') s.best++;
+      if (d.g != null && r3(d.g) >= CRIT) { s.crit++; if (band === 'best') s.critBest++; }
+    }
+    for (const k of ['lost', 'lostM', 'lostC']) s[k] = r4(s[k]);
+    return s;
+  }
+  // For the end panel, the review and the Full reviews list: a game's record, its costs once rolled out, a saved game's ER.
+  const recIdOf = (gm, M) => (gm.rules.type === 'match' && M ? `${M.id}-g${gm.n}` : gm.id);
+  const recOf = (gm, M) => TR.docs.get(recIdOf(gm, M)) || null;
+  function costsFor(pairs) {
+    const recs = pairs.map(([, id]) => TR.docs.get(id));
+    if (!recs.length || recs.some((r) => !r || r.lvl !== 'ro')) return null;
+    return pairs.flatMap(([g], i) => recs[i].decs.map((d) => ({ g, t: d.t, k: d.k, c: d.c, n: d.n, b: d.b })));
+  }
+  const nGames = new Map();
+  function erOf(e) {
+    if (!e || !e.id) return null;
+    let ids = [e.id];
+    if (e.kind === 'match') {
+      let n = nGames.get(e.id); if (n == null) { try { n = R.checkBgPlayMat(e.mat).games.length; } catch (err) { n = 0; } nGames.set(e.id, n); }
+      ids = Array.from({ length: n }, (_, i) => `${e.id}-g${i + 1}`);
+    }
+    const recs = ids.map((id) => TR.docs.get(id));
+    if (!recs.length || recs.some((r) => !r || r.lvl !== 'ro')) return null;
+    const n = recs.reduce((a, r) => a + r.you.n, 0), lost = recs.reduce((a, r) => a + r.you.lost, 0);
+    return { er: n ? (lost * 500) / n : 0, n, total: lost };
+  }
+
   // ------------------------------------------------------------- the database
   async function store(rec) {
     rec = JSON.parse(JSON.stringify(rec));              // plain data only (no undefined)
@@ -321,7 +437,7 @@
         for (const r of TR.out) m.set(r.id, r);
         TR.docs = m; TR.loaded = true; TR.dbErr = '';
         for (const [id, x] of pend) enqueueExt(id, x);
-        flush(); scan(); paint();
+        flush(); scan(); paint(); roKick();
         if (window.BQ) BQ.refresh();               // the Blunder Quiz takes the new blunders
       }, (err) => { TR.dbErr = String((err && (err.code || err.message)) || err); paint(); });
     } catch (e) { TR.dbErr = String(e.message || e); }
@@ -428,6 +544,8 @@
     const n = TR.q.reduce((a, x) => a + (x.ids ? x.ids.filter((id) => !tracked(id)).length : 1), 0);
     if (TR.dbErr) return `<span class="bad">The progress records can't be read here: ${esc(TR.dbErr)}</span>`;
     if (n) return `<span class="run">Adding ${plural(n, 'game')} to your progress${ENG.state === 'ready' ? '' : ' (when the engine is free)'}…</span>`;
+    const left = all().filter(roPending).length;
+    if (left) return `<span class="run">Rolling out your close decisions: ${plural(left, 'game')} to go${RO.cur && RO.cur.n ? ` (this one ${RO.cur.done} of ${RO.cur.n})` : ''}${ENG.state === 'ready' ? '' : ', when the engine is free'}…</span>`;
     if (TR.err) return `<span class="bad">${esc(TR.err)}</span>`;
     return '';
   }
@@ -489,7 +607,7 @@
     h += '</table></div></details>';
     const sdM = m.hit || m.opp ? 0 : sdOf(list.filter(m.pick));
     const notes = {
-      pr: `PR = equity lost × 500 / decisions, counted as XG counts them (forced and obvious decisions left out), from Open Sage at ${ER_PLY}-ply with the XG book for turns 1-2. The 95% range uses the spread of your own errors (${f1(sdM)} per decision).`,
+      pr: `PR = equity lost × 500 / decisions, counted as XG counts them (forced and obvious decisions left out). The 95% range uses the spread of your own errors (${f1(sdM)} per decision).`,
       prM: `Checker play PR: PR over your checker plays alone (XG's level). The 95% range uses the spread of your checker-play errors (${f1(sdM)} per play). XG's rating bands rate a PR over all decisions, so they aren't shaded here.`,
       prC: `Cube PR: PR over your counted cube decisions alone (XG's level); they're rarer, so the line takes your last 100. The 95% range uses the spread of your cube errors (${f1(sdM)} per decision). No rating bands: XG's rate a PR over all decisions.`,
       best: 'Best moves: the share of your counted decisions where you chose the engine\'s best (or shown as 0.000). The 95% range is Wilson\'s interval for a share.',
@@ -499,6 +617,8 @@
       opp: 'Opponent PR: your opponent\'s decisions, counted and scored the same way. Only each game\'s totals are kept for the opponent, so the line takes whole games (about 500 decisions) and has no 95% range.',
     };
     h += `<p class="muted small">${notes[m.k]}</p>`;
+    const nRo = recs.filter((r) => r.lvl === 'ro').length;
+    h += `<p class="muted small">Your costs: rolled out (Open Sage truncated rollouts, 360 games a play, about XG Roller++) where the decision was close or your play wasn't the best, once a game's rollout is done (${nRo} of ${plural(recs.length, 'game')} so far); otherwise ${ER_PLY}-ply, and turns 1-2 from the XG opening book. The opponent's stay at ${ER_PLY}-ply.</p>`;
     // monthly
     const months = new Map(); for (const r of recs) { const k = r.at.slice(0, 7); if (!months.has(k)) months.set(k, []); months.get(k).push(r); }
     h += `<h2>By month</h2><div class="tscroll"><table class="pt"><tr><th>Month</th><th class="w">Games</th><th class="w">Decisions</th><th>PR</th><th>Checker</th><th>Cube</th><th>Errors /100</th><th>Blunders /100</th><th>Best</th></tr>`;
@@ -649,8 +769,9 @@
   // The end-of-game panel's words on this game's progress record (tile).
   function endState(gm, M0) {
     if (TARGET !== 'tile') return '';
-    const M = M0 || S.match, id = gm.rules.type === 'match' && M ? `${M.id}-g${gm.n}` : gm.id;
-    return tracked(id) ? 'Added to your progress.' : gm.er ? 'Adding to your progress…' : 'Added to your progress once your ER is ready.';
+    const M = M0 || S.match, id = recIdOf(gm, M), r = TR.docs.get(id);
+    if (r && r.lvl === 'ro') return 'Added to your progress, rolled out.';
+    return tracked(id) ? 'Added to your progress at 4-ply; rolled out next.' : gm.er ? 'Adding to your progress…' : 'Added to your progress once your ER is ready.';
   }
   let cssDone = false;
   function css() {
@@ -703,9 +824,9 @@
   function init() {
     load();
     if (TARGET !== 'tile') return;
-    setInterval(() => { if (!TR.busy && TR.q.length) kick(); if (TR.out.length) flush(); }, 15000);
+    setInterval(() => { if (!TR.busy && TR.q.length) kick(); else roKick(); if (TR.out.length) flush(); if (ENG.pool) ENG.pool.pump(); }, 15000);
     let rz = 0; window.addEventListener('resize', () => { if (!isOpen()) return; cancelAnimationFrame(rz); rz = requestAnimationFrame(hookChart); });   // turning the phone: the chart takes the new width
   }
   window.PG = { init, setDb, kick, gameOver, keepMatch, enqueueFile, scan, open, close, setView, metric, vals: (o) => { TR.view.vals = !!o; }, review, endState, isTracked: tracked, posType, TYPES, KINDS, COL, METRICS,
-    _state: TR, _agg: agg, _series: seriesOf, _metricOf: metricOf, _record: record, _fileGames: fileGames };
+    recOf, costsFor, erOf, _state: TR, _ro: RO, _roWants: roWants, _roKick: roKick, _agg: agg, _series: seriesOf, _metricOf: metricOf, _record: record, _fileGames: fileGames };
 })();

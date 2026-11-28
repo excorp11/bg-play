@@ -69,7 +69,7 @@
       for (const d of r.decs) {
         if (!d.n || !(d.c >= OK - 1e-9) || !d.x) continue;
         out.push({ id: `p-${r.id}-${d.t}${d.k}`, src: r.src || 'tile', rec: r.id, at: r.at, opp: r.opp || '', type: r.type, len: r.len || 0, rules: r.rules,
-          g: r.match ? r.match.n : 1, t: d.t, k: d.k, x: d.x, p: d.p, b: d.b, c: d.c, pt: d.pt || '', ck: d.ck || '', top: d.top || null, eq: d.eq || null });
+          g: r.match ? r.match.n : 1, t: d.t, k: d.k, x: d.x, p: d.p, b: d.b, c: d.c, pt: d.pt || '', ck: d.ck || '', top: d.top || null, eq: d.eq || null, ro: d.ro ? (r.ro && r.ro.games) || 360 : 0, roc: d.ro ? (r.ro && r.ro.cube) || 432 : 0 });
       }
     }
     // the earlier reviews' errors: the tile's quiz-reviews.json (rescored at 4-ply), and any written to the database
@@ -260,12 +260,13 @@
     if (Q.cur !== C) return;
     C.busy = false;
     if (!r || r.err) { C.pending = null; warm(C); paint(); return toast('The engine was busy: check again'); }
-    judge({ name, cost: r.cost, res: r, after, steps: C.pending.steps });
+    judge({ name, cost: roCost(C.q, name, r.cost), res: r, after, steps: C.pending.steps });
   }
   // Double / No double (your turn before rolling), Take / Pass / Beaver (their double).
   async function cube(k) {
     const C = Q.cur; if (!C || !C.q || C.busy || C.state !== 'ask' || C.q.k === 'M') return;
     if (C.P.take ? !'TPB'.includes(k) : !'RD'.includes(k)) return;
+    if (C.q.ro && C.q.eq) { const rr = roCube(C, k); return judge({ name: actName(C, k), k, cost: rr.cost, res: rr }); }
     const dec = { ...C.base, k }; hidden(dec, '_c', C.base._c);
     C.busy = true; paint();
     let r; try { r = await analyzeDecision(dec, 'hi'); } catch (e) { r = null; }
@@ -273,6 +274,23 @@
     C.busy = false;
     if (!r || r.err) { warm(C); paint(); return toast('The engine was busy: answer again'); }
     judge({ name: actName(C, k), k, cost: r.cost, res: r });
+  }
+  // Positions rolled out by Progress (the user's rule, 2026-11-28: the rollout replaces 4-ply wherever it exists). A play
+  // the rollout covers costs what the rollout says; one it doesn't (more than 0.08 behind at 4-ply) costs its 4-ply cost,
+  // never less than the rollout's last listed play, as with the XG book.
+  function roCost(q, name, cost4) {
+    if (!q.ro || !q.top || !q.top.length) return cost4;
+    const t = q.top.find((x) => x.m === name);
+    return t ? t.c : Math.max(cost4, q.top[q.top.length - 1].c);
+  }
+  function roCube(C, k) {
+    const e = C.q.eq, take = !!C.P.take;
+    if (!take) {
+      const doubled = Math.min(e.dt, e.dp), best = Math.max(e.nd, doubled);
+      return { nd: e.nd, dt: e.dt, dp: e.dp, best: doubled > e.nd + 1e-9 ? 'Double' : 'No double', cost: Math.max(0, k === 'R' ? best - e.nd : best - doubled), ro: C.q.roc || 432 };
+    }
+    const DT = e.bv ? e.dt / 2 : e.dt, E = { P: -e.dp, T: -DT, B: C.base.g.bea ? -2 * DT : -Infinity }, best = Math.max(E.P, E.T, E.B);
+    return { E, nd: e.nd, dt: e.dt, dp: e.dp, best: best === E.B ? 'Beaver' : best === E.T ? 'Take' : 'Pass', cost: Math.max(0, best - E[k]), ro: C.q.roc || 432 };
   }
   const actName = (C, k) => {
     const owned = !!C.P.cube.owner;
@@ -307,6 +325,7 @@
     const C = Q.cur; if (!C || !C.q || C.busy || C.state === 'right' || C.state === 'shown') return;
     if (!C.tries.length && !C.revealed) record(C.q, false);
     C.revealed = true;
+    if (!C.res && C.q.k !== 'M' && C.q.ro && C.q.eq) C.res = roCube(C, C.q.k);
     if (!C.res) {        // nothing answered yet: the analysis of the game's own decision gives the ranking or the cube
       const pl = C.q.k === 'M' ? playOf(C.P, C.q.p) : null;
       const dec = C.q.k === 'M' ? { ...C.base, after: pl ? pl.board : C.P.board, played: C.q.p } : { ...C.base, k: C.q.k };
@@ -342,8 +361,8 @@
       if (!row) { const e = b ? R.legalPlays(P.board, P.dice[0], P.dice[1]).plays.get(R.key(b)) : playOf(P, name); row = { name, cost: Math.max(0, cost), steps: stepsOf(e), tags: [] }; rows.push(row); }
       return row;
     };
-    // the book's ranking for an opening position (its costs are the book's), else the 4-ply candidates
-    if (String(r.src || '').startsWith('XG book') && C.q.top) for (const t of C.q.top) add(t.m, t.c);
+    // the book's ranking for an opening position (its costs are the book's), the rollout's for a rolled-out one, else 4-ply
+    if ((String(r.src || '').startsWith('XG book') || C.q.ro) && C.q.top) for (const t of C.q.top) add(t.m, t.c);
     else for (const c of r.cands) add(c.name, top - c.e, c.b);
     for (const a of C.tries) add(a.name, a.cost).tags.push('yours');
     if (C.q.p) add(C.q.p, C.q.c).tags.push('in the game');
@@ -426,7 +445,7 @@
       const sel = C.sel ? C.sel === r.name : r.tags.includes('yours') && r.name === C.tries[C.tries.length - 1]?.name;
       h += `<tr class="${sel ? 'sel' : ''}" onclick='BQ.pick(${esc(JSON.stringify(r.name))})'><td>${esc(r.name)}</td><td class="${BANDCLS[band(r.cost)]}">${costTxt(r.cost)}</td><td class="muted small">${esc(r.tags.join(', '))}</td></tr>`;
     }
-    return h + `</table><div class="muted small">Tap a play to see it on the board (the best in green). ${String(C.res && C.res.src || '').startsWith('XG book') ? 'Costs from the XG opening book.' : 'Open Sage 4-ply.'}</div>`;
+    return h + `</table><div class="muted small">Tap a play to see it on the board (the best in green). ${String(C.res && C.res.src || '').startsWith('XG book') ? 'Costs from the XG opening book.' : C.q.ro && C.q.top ? `Rolled out: ${C.q.ro} games a play, about XG Roller++ (a play not listed: 4-ply).` : 'Open Sage 4-ply.'}</div>`;
   }
   function cubeTable(C) {
     const r = C.res; if (!r) return '';
@@ -435,11 +454,11 @@
     if (!P.take) {
       const owned = !!P.cube.owner, rows = [[owned ? 'No redouble' : 'No double', r.nd], [`${owned ? 'Redouble' : 'Double'}/take`, r.dt], [`${owned ? 'Redouble' : 'Double'}/pass`, r.dp]];
       for (const [l, v] of rows) h += `<tr><td>${esc(l)}</td><td>${f(v)}</td></tr>`;
-      h += `</table><div class="small">Best: <b>${esc(r.best === 'Double' ? (owned ? 'Redouble' : 'Double') : owned ? 'No redouble' : 'No double')}</b>. Your equity at 4-ply, per cube before the double.</div>`;
+      h += `</table><div class="small">Best: <b>${esc(r.best === 'Double' ? (owned ? 'Redouble' : 'Double') : owned ? 'No redouble' : 'No double')}</b>. Your equity ${r.ro ? `rolled out (${r.ro} games, about XG Roller++)` : 'at 4-ply'}, per cube before the double.</div>`;
     } else {
       const E = r.E || {};
       for (const [l, v] of [['Take', E.T], ['Pass', E.P], ['Beaver', E.B]]) if (Number.isFinite(v)) h += `<tr><td>${l}</td><td>${f(v)}</td></tr>`;
-      h += `</table><div class="small">Best: <b>${esc(r.best)}</b>. Your equity at 4-ply, per cube before the double.</div>`;
+      h += `</table><div class="small">Best: <b>${esc(r.best)}</b>. Your equity ${r.ro ? `rolled out (${r.ro} games, about XG Roller++)` : 'at 4-ply'}, per cube before the double.</div>`;
     }
     const tried = C.tries.map((a) => `${a.name} ${costTxt(a.cost)}`).join(', ');
     return h + (tried ? `<div class="small muted">Your answer${C.tries.length > 1 ? 's' : ''}: ${esc(tried)}.</div>` : '');

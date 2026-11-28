@@ -42,13 +42,14 @@ function load() {
 
 // ------------------------------------------------------------- engine: a pool of workers with two priorities
 class Pool {
-  constructor(n) { this.n = n; this.workers = []; this.idle = []; this.hi = []; this.lo = []; this.bg = []; this.cbs = {}; this.seq = 0; }
+  constructor(n) { this.n = n; this.workers = []; this.idle = []; this.hi = []; this.lo = []; this.bg = []; this.ro = []; this.roRun = 0; this.roIds = new Set(); this.cbs = {}; this.seq = 0; }
   async init(weights, manifest) {
     const inits = [];
     for (let i = 0; i < this.n; i++) {
       const w = new Worker('worker.js');
       w.onmessage = (ev) => {
         const m = ev.data, cb = this.cbs[m.id]; delete this.cbs[m.id];
+        if (this.roIds.delete(m.id)) this.roRun--;
         if (!this.idle.includes(w)) this.idle.push(w);
         this.pump(); if (cb) cb(m);
       };
@@ -59,21 +60,31 @@ class Pool {
     const rs = await Promise.all(inits);
     for (const r of rs) if (!r.ok) throw new Error(r.error);
   }
-  // Three queues: hi (Open Sage's moves, what you wait for), lo (your decisions' analysis while you think), bg (progress
-  // tracking, only when nothing else waits).
-  run(msg, prio) { return new Promise((res) => { (prio === 'lo' ? this.lo : prio === 'bg' ? this.bg : this.hi).push([msg, res]); this.pump(); }); }
+  // Four queues: hi (Open Sage's moves, what you wait for), lo (your decisions' analysis while you think), bg (progress
+  // tracking, only when nothing else waits), ro (Progress's rollouts: long jobs, so they never take every worker; see roCap).
+  run(msg, prio) { return new Promise((res) => { (prio === 'lo' ? this.lo : prio === 'bg' ? this.bg : prio === 'ro' ? this.ro : this.hi).push([msg, res]); this.pump(); }); }
   all(msg) { return Promise.all(this.workers.map((w) => new Promise((res) => { this.idle = this.idle.filter((x) => x !== w); const id = ++this.seq; this.cbs[id] = res; w.postMessage({ ...msg, id }); }))); }
   pump() {
-    while (this.idle.length && (this.hi.length || this.lo.length || this.bg.length)) {
-      const w = this.idle.shift(), [msg, res] = (this.hi.length ? this.hi : this.lo.length ? this.lo : this.bg).shift();
-      const id = ++this.seq; this.cbs[id] = res; w.postMessage({ ...msg, id });
+    while (this.idle.length) {
+      let q = this.hi.length ? this.hi : this.lo.length ? this.lo : this.bg.length ? this.bg : null, ro = false;
+      if (!q && this.ro.length && this.roRun < roCap(this.n)) { q = this.ro; ro = true; }
+      if (!q) break;
+      const w = this.idle.shift(), [msg, res] = q.shift(), id = ++this.seq;
+      if (ro) { this.roRun++; this.roIds.add(id); }
+      this.cbs[id] = res; w.postMessage({ ...msg, id });
     }
   }
   // Stops the workers; every job queued or running ends as 'cancelled' (callers redo it after a restart).
   terminate() {
-    this.workers.forEach((w) => w.terminate()); [...this.hi, ...this.lo, ...this.bg].forEach(([, res]) => res({ ok: false, error: 'cancelled' })); this.hi = []; this.lo = []; this.bg = [];
+    this.workers.forEach((w) => w.terminate()); [...this.hi, ...this.lo, ...this.bg, ...this.ro].forEach(([, res]) => res({ ok: false, error: 'cancelled' })); this.hi = []; this.lo = []; this.bg = []; this.ro = []; this.roRun = 0; this.roIds.clear();
     const cbs = this.cbs; this.cbs = {}; Object.values(cbs).forEach((cb) => cb({ ok: false, error: 'cancelled' }));
   }
+}
+// Workers Progress's rollouts may hold (a rollout runs 1-15 s and can't be cut short): during a game or the Blunder Quiz
+// half of them, so Open Sage's moves and your analysis keep theirs; otherwise all but one.
+function roCap(n) {
+  const gm = S.game, active = !!(gm && (gm.quiz || (gm.phase !== 'over' && !atHome())));
+  return active ? Math.floor(n / 2) : Math.max(1, n - 1);
 }
 const ENG = { pool: null, state: 'loading', msg: 'Loading the engine…', weights: null, manifest: null };
 async function loadEngine() {
@@ -241,29 +252,32 @@ function analyzeDecision(d, prio = 'lo') {
         const cands = at3.slice(0, 5).map((c) => ({ b: c.b, e: c.e[ER_PLY], name: R.notation(d.board, c.b, d.dice[0], d.dice[1]) }));
         d.res = { cost, counted: r.plays.length > 1 && spread >= FLAT, spread, best: R.notation(d.board, bestB, d.dice[0], d.dice[1]), bestB, src, cands,
           playedE: played.e[ER_PLY], n: r.plays.length, ply: ER_PLY };
-      } else if (d.k === 'R' || d.k === 'D') {
-        const c = await (d._c || cubeEval(d.board, ER_PLY, d.g, prio)), nd = c.equity_nd, dt = c.equity_dt, dp = c.equity_dp;
-        const doubled = Math.min(dt, dp), best = Math.max(nd, doubled);
-        const cost = d.k === 'R' ? best - nd : best - doubled;
-        let why = '';
-        if (d.k === 'R') {
-          if (Math.abs(nd - doubled) < 0.0005) why = 'optional double'; else if (nd - dt > WINDOW) why = 'obvious no double';
-          else if (nd - dp > WINDOW) why = 'obvious too good'; else if (nd < LOW && dt < LOW) why = 'very negative';
-        }
-        const bestAct = doubled > nd + 1e-9 ? 'Double' : 'No double';
-        d.res = { cost: Math.max(0, cost), counted: !why, why, nd, dt, dp, beaver: c.is_beaver, best: bestAct, probs: c.probs, ply: d._c3 ? AUTO_PLY : ER_PLY };
-      } else {
-        const c = await (d._c || cubeEval(d.board, ER_PLY, d.g, prio)), DT = c.is_beaver ? c.equity_dt / 2 : c.equity_dt;
-        const E = { P: -c.equity_dp, T: -DT, B: d.g.bea ? -2 * DT : -Infinity };
-        const best = Math.max(E.P, E.T, E.B), bestAct = best === E.B ? 'Beaver' : best === E.T ? 'Take' : 'Pass';
-        d.res = { cost: Math.max(0, best - E[d.k]), counted: true, E, best: bestAct, nd: c.equity_nd, dt: c.equity_dt, dp: c.equity_dp, beaver: c.is_beaver, probs: c.probs, ply: ER_PLY };
-      }
+      } else d.res = cubeRes(d, await (d._c || cubeEval(d.board, ER_PLY, d.g, prio)), d._c3 && 'RD'.includes(d.k) ? AUTO_PLY : ER_PLY);
     } catch (e) {
       if (stopped(e)) { hidden(d, '_p', null); for (const k of ['_rk', '_rk' + AUTO_PLY, '_c']) if (d[k]) hidden(d, k, null); return null; }   // redone after the restart
       d.res = { cost: 0, counted: false, err: String(e.message || e) };
     }
     return d.res;
   })());
+}
+// A cube decision's result from the cube's equities c = {equity_nd, equity_dt, equity_dp, is_beaver, probs}, the doubler's,
+// at 4-ply or rolled out (Progress at rollout level).
+function cubeRes(d, c, ply) {
+  if (d.k === 'R' || d.k === 'D') {
+    const nd = c.equity_nd, dt = c.equity_dt, dp = c.equity_dp, doubled = Math.min(dt, dp), best = Math.max(nd, doubled);
+    const cost = d.k === 'R' ? best - nd : best - doubled;
+    let why = '';
+    if (d.k === 'R') {
+      if (Math.abs(nd - doubled) < 0.0005) why = 'optional double'; else if (nd - dt > WINDOW) why = 'obvious no double';
+      else if (nd - dp > WINDOW) why = 'obvious too good'; else if (nd < LOW && dt < LOW) why = 'very negative';
+    }
+    const bestAct = doubled > nd + 1e-9 ? 'Double' : 'No double';
+    return { cost: Math.max(0, cost), counted: !why, why, nd, dt, dp, beaver: c.is_beaver, best: bestAct, probs: c.probs, ply };
+  }
+  const DT = c.is_beaver ? c.equity_dt / 2 : c.equity_dt;
+  const E = { P: -c.equity_dp, T: -DT, B: d.g.bea ? -2 * DT : -Infinity };
+  const best = Math.max(E.P, E.T, E.B), bestAct = best === E.B ? 'Beaver' : best === E.T ? 'Take' : 'Pass';
+  return { cost: Math.max(0, best - E[d.k]), counted: true, E, best: bestAct, nd: c.equity_nd, dt: c.equity_dt, dp: c.equity_dp, beaver: c.is_beaver, probs: c.probs, ply };
 }
 function computeER(decs) {
   const rows = decs.filter((d) => d.res && d.res.counted);
@@ -1079,8 +1093,9 @@ function resultText(gm) {
 }
 function overPanel(gm) {
   let h = `<div class="status ${gm.result.winner === 'me' ? 'good' : ''}">${esc(resultText(gm))}</div>`;
-  const pending = gm.decisions.filter((d) => !d.res).length;
+  const pending = gm.decisions.filter((d) => !d.res).length, RR = window.PG && PG.recOf ? PG.recOf(gm, S.match) : null;
   if (!gm.er) h += `<div class="card"><div class="run">Working out your ER at ${ER_PLY}-ply: ${plural(pending, 'decision')} left…</div></div>`;
+  else if (RR && RR.lvl === 'ro') h += erCardRec(RR);       // rolled out: the rollout's figures replace the 4-ply ones
   else {
     const E = gm.er;
     h += `<div class="card er"><div class="erbig">ER ${E.er.toFixed(2)}</div><div class="small">${E.total.toFixed(3)} equity lost × 500 / ${plural(E.n, 'decision')} (${E.nMoves} checker plays, ${E.nCube} cube). Checker ${E.n ? (E.checker * 500 / E.n).toFixed(2) : '0.00'}, cube ${E.n ? (E.cube * 500 / E.n).toFixed(2) : '0.00'}.</div>`;
@@ -1123,6 +1138,26 @@ function fateCard(gm) {
   return h;
 }
 const decPlayed = (d) => (d.k === 'M' ? `${d.dice[0]}-${d.dice[1]} ${d.played}` : { R: 'No double', D: 'Double', T: 'Take', P: 'Pass', B: 'Beaver' }[d.k]);
+// The end panel's ER card from the game's progress record once its close decisions are rolled out (Progress at rollout
+// level, the user's request 2026-11-28: the rollout replaces the 4-ply figures, which aren't shown beside it).
+function erCardRec(rec) {
+  const ds = rec.decs || [], cnt = ds.filter((d) => d.n), n = cnt.length, total = cnt.reduce((a, d) => a + d.c, 0);
+  const cube = cnt.filter((d) => d.k !== 'M').reduce((a, d) => a + d.c, 0), nM = cnt.filter((d) => d.k === 'M').length, per = (x) => (n ? ((x * 500) / n).toFixed(2) : '0.00');
+  let h = `<div class="card er"><div class="erbig">ER ${per(total)}</div><div class="small">${total.toFixed(3)} equity lost × 500 / ${plural(n, 'decision')} (${nM} checker plays, ${n - nM} cube). Checker ${per(total - cube)}, cube ${per(cube)}.</div>`;
+  const W = { forced: 'forced', flat: 'all plays within 0.001', nd: 'obvious no double', tg: 'obvious too good', low: 'very negative', opt: 'optional double' }, sk = {};
+  for (const d of ds) if (!d.n) { const w = W[d.w] || 'other'; sk[w] = (sk[w] || 0) + 1; }
+  const skt = Object.entries(sk).map(([k, v]) => `${v} ${k}`).join(', ');
+  if (skt) h += `<div class="muted small">Not counted: ${esc(skt)}.</div>`;
+  const errs = cnt.filter((d) => d.c >= ERR_MIN).sort((a, b) => b.c - a.c), nb = errs.filter((d) => d.c >= BLUNDER_MIN).length;
+  h += `<div class="row" style="margin:8px 0 4px">${btn(errs.length ? `Review: your ${plural(errs.length, 'error')}${nb ? ` (${plural(nb, 'blunder')})` : ''} or every move` : 'Review every move', "openReview('current')", 'primary')}</div>`;
+  if (errs.length) {
+    const dice = (x) => { const f = String(x || '').split(':')[4] || ''; return /^[1-6]{2}$/.test(f) ? `${f[0]}-${f[1]} ` : ''; };
+    h += `<table class="mini errs"><tr><th>Turn</th><th>You</th><th>Best</th><th>Cost</th></tr>`;
+    for (const d of errs) h += `<tr onclick="openReview('current', '${decKey(1, d.t, d.k)}')"><td>${d.t}</td><td>${esc(d.k === 'M' ? dice(d.x) + d.p : d.p)}</td><td>${esc(d.b)}</td><td class="cost ${tierCls(tierOf(d.c, true))}">${d.c.toFixed(3)}</td></tr>`;
+    h += `</table><div class="muted small">Tap a row to open it in the review. Costs rolled out where the decision was close (${(rec.ro && rec.ro.games) || 360} games a play, about XG Roller++), else ${ER_PLY}-ply; turns 1–2 from the XG opening book.</div>`;
+  } else h += `<div class="small good">No errors of 0.020 or more.</div>`;
+  return h + '</div>';
+}
 function viewDecision(i) {
   const gm = S.game, d = gm.decisions[i]; if (!d) return;
   const board = d.k === 'T' || d.k === 'P' || d.k === 'B' ? R.flip(d.board) : d.board.slice();
@@ -1232,12 +1267,14 @@ async function openReview(src, at) {
       const gm = S.game; if (!gm || gm.phase !== 'over') return;
       if (gm.decisions.some((d) => !d.res)) { toast('Finishing your ER first…'); await Promise.all(gm.decisions.map((d) => analyzeDecision(d, 'hi'))); }
       games = R.replayGames({ games: [{ n: 1, score: [gm.score.me, gm.score.bot], crawford: gm.crawford, events: gm.events }] }, gm.rules);
-      costs = costMap(compactDecs(gm.decisions, 1)); title = `Review: ${resultText(gm)}`;
+      const RR = window.PG && PG.recOf ? PG.recOf(gm, S.match) : null, rolled = RR && RR.lvl === 'ro' ? PG.costsFor([[1, RR.id]]) : null;
+      costs = costMap(rolled || compactDecs(gm.decisions, 1)); title = `Review: ${resultText(gm)}`;
     } else {
       const e = S.saved.find((x) => x.id === src); if (!e) return;
       const chk = R.checkBgPlayMat(e.mat); games = chk.games; title = `Review: ${e.title}`;
-      if (!(e.decs && e.decsPly === ER_PLY)) { const decs = await scoreSaved(e, games); if (!decs) return; e.decs = decs; e.decsPly = ER_PLY; save(); }
-      costs = costMap(e.decs);
+      const rolled = window.PG && PG.costsFor ? PG.costsFor(chk.kind === 'match' ? games.map((G) => [G.n, `${e.id}-g${G.n}`]) : [[1, e.id]]) : null;
+      if (!rolled && !(e.decs && e.decsPly === ER_PLY)) { const decs = await scoreSaved(e, games); if (!decs) return; e.decs = decs; e.decsPly = ER_PLY; save(); }
+      costs = costMap(rolled || e.decs);
     }
   } catch (err) { RVJOB = null; renderMenu(); toast(`This game can't be reviewed: ${err.message || err}`, 4000); return; }
   const items = reviewItems(games, costs);
@@ -1495,7 +1532,8 @@ function savedList(list, opts = {}) {
   let h = '<div class="saved">';
   for (const e of list) {
     const id = esc(JSON.stringify(e.id));
-    h += `<div class="sv"><div><b>${esc(e.title)}${e.created ? ' ' + hhmm(e.created) : ''}</b> · ${esc(e.result || '')}${e.er ? ` · ER ${(+e.er.er).toFixed(2)}` : ''}</div><div class="small ${e.status === 'error' ? 'bad' : 'muted'}">${esc(savedLabel(e))}${e.fireErr && e.status === 'sent' ? ' · ' + esc(e.fireErr) : ''}${e.err && e.status === 'error' ? ' · ' + esc(e.err) : ''}</div>`;
+    const er = (TARGET === 'tile' && window.PG && PG.erOf && PG.erOf(e)) || e.er;
+    h += `<div class="sv"><div><b>${esc(e.title)}${e.created ? ' ' + hhmm(e.created) : ''}</b> · ${esc(e.result || '')}${er ? ` · ER ${(+er.er).toFixed(2)}` : ''}</div><div class="small ${e.status === 'error' ? 'bad' : 'muted'}">${esc(savedLabel(e))}${e.fireErr && e.status === 'sent' ? ' · ' + esc(e.fireErr) : ''}${e.err && e.status === 'error' ? ' · ' + esc(e.err) : ''}</div>`;
     let row = '';
     if (e.review) row += `<a class="btnlink primary" href="${esc(e.review)}" target="_blank" rel="noopener">Open the review</a>`;
     if (TARGET === 'tile' && e.status === 'sent' && e.fireErr) row += btn('Start the review', `retryFire(${id})`);

@@ -38,6 +38,11 @@ const E = {
   // cand is the mover's board after the play: if it ends the game, the mover has won.
   evalN: (b, c, ply, g) => { const o = over(c, g); return o ? { e: o.e, p: o.probs } : take(M._te_eval(put(buf.b, b), put(buf.c, c), ply, ...G(g))); },
   cube: (b, ply, g) => { const o = over(b, g); return o ? finished(o) : take(M._te_cube(put(buf.b, b), ply, ...G(g))); },
+  // Truncated rollouts of n games (Progress at rollout level). Preset 3: the first two decisions of each game at 3-ply,
+  // then 2-ply, truncated after 7 moves (about XG Roller++), as the analyzer's Standard rollout. post: the mover's board
+  // after the play (the mover's equity comes back); b: a cube decision's board, the doubler on roll ({nd, dt}, the doubler's).
+  rollPlay: (post, preset, n, seed, g) => { const o = over(post, g); return o ? { e: o.e, se: 0, p: o.probs } : take(M._te_rollout_play(put(buf.b, post), preset, n, seed, ...G(g))); },
+  rollCube: (b, preset, n, seed, g) => take(M._te_rollout_cube(put(buf.b, b), preset, n, seed, ...G(g))),
   // For a roll's luck (the progress tracker): the best play's 1-ply equity for each of the 21 rolls (1-1, 2-1, 2-2, 3-1,
   // ... 6-6: high die 1 to 6, low die 1 to high), the position unchanged when a roll has no move.
   luck: (b, g) => {
@@ -76,6 +81,8 @@ self.onmessage = async (ev) => {
       case 'eval': result = E.evalN(m.board, m.cand, m.ply, m.g); break;
       case 'cube': result = E.cube(m.board, m.ply, m.g); break;
       case 'luck': result = E.luck(m.board, m.g); break;
+      case 'rollPlay': result = E.rollPlay(m.post, m.preset, m.n, m.seed, m.g); break;
+      case 'rollCube': result = E.rollCube(m.board, m.preset, m.n, m.seed, m.g); break;
       default: throw new Error('unknown command ' + m.cmd);
     }
     self.postMessage({ id: m.id, ok: true, result, ms: performance.now() - t0 });
