@@ -1428,7 +1428,7 @@ function renderMenu() {
   if (TARGET === 'pwa') { const nU = unsent().length; h += `<h4>Games for the tile</h4><div class="row">${btn(`Games for the tile (${S.saved.length})`, 'openMenu(\'saved\')')}</div>${nU ? `<div class="row" style="margin-top:6px">${sendLink(sendLabel())}</div>` : ''}`; }
   else h += `<h4>Full reviews</h4>${btn(`Full reviews (${S.saved.length})`, 'openMenu(\'saved\')')}`;
   if (TARGET === 'tile') h += `<h4>Progress</h4><div class="row">${btn('Progress', 'PG.open()')}${btn('Blunder Quiz', 'BQ.open()', '', !!(gm && gm.phase !== 'over' && (gm.onRoll !== 'me' || busy)))}</div>`;
-  else { const nU = unsent().length; h += `<h4>Progress</h4><p class="small muted">Your progress is in the BG Play tile: every game you finish here goes there with Send to the tile${nU ? ` (${plural(nU, 'game')} waiting)` : ''}.</p>`; }
+  else { const nN = newCount(); h += `<h4>Progress</h4><p class="small muted">Your progress is in the BG Play tile: every game you finish here goes there with Send to the tile${nN ? ` (${plural(nN, 'new game')} waiting)` : ''}.</p>`; }
   h += `<h4>Engine</h4><div class="field">Workers ${['1', '2', '4', '6'].map((n) => btn(n, `setWorkers(${n})`, S.set.workers === +n ? 'on' : '')).join('')}</div>`;
   if (TARGET === 'tile') h += `<div class="row">${btn('Copy the opening book for the offline app', 'copyBook()')}</div>`;
   else h += `<div class="small">${BOOK ? 'Opening book loaded (XG book for your turns 1–2).' : `No opening book: your turns 1–2 are scored at ${ER_PLY}-ply.`}</div><div class="row">${btn(BOOK ? 'Replace the opening book' : 'Paste the opening book', 'openPaste(\'book\')')}</div>${installBtn()}`;
@@ -1476,10 +1476,17 @@ function wantReview(id) {
   e.want = 'review'; e.status = 'local'; e.copied = 0; save(); prepareBundle(); renderAll(); if (S.ui.menu) renderMenu();
   toast('Marked for Claude\'s full review: it goes with your next Send to the tile.', 3500);
 }
-// Offline app: what Send to the tile will carry.
+// Offline app: what Send to the tile will carry (the user's request, 2026-11-27: never sent apart from sent before).
+// The games never sent, by what they're for, and the ones copied in the last 3 days, which go again in case that
+// paste didn't happen (the tile skips games it already has): "Send to the tile: 1 new for full review, plus 2 already
+// sent", or with nothing new "Send to the tile again: 2 already sent".
+const newCount = () => unsent().filter((x) => x.status !== 'copied').length;
 function sendLabel() {
-  const u = unsent(), r = u.filter((x) => x.want !== 'track').length, t = u.length - r;
-  return `Send to the tile: ${[r ? `${r} for full review` : '', t ? `${t} for progress only` : ''].filter(Boolean).join(', ')}`;
+  const u = unsent(), fresh = u.filter((x) => x.status !== 'copied'), again = u.length - fresh.length;
+  const r = fresh.filter((x) => x.want !== 'track').length, t = fresh.length - r;
+  const parts = [r ? `${r} new for full review` : '', t ? `${t} new for progress only` : ''].filter(Boolean);
+  if (!parts.length) return `Send to the tile again: ${again} already sent`;
+  return `Send to the tile: ${parts.join(', ')}${again ? `, plus ${again} already sent` : ''}`;
 }
 async function saveForAnalysis() {
   const gm = S.game; if (!gm || gm.phase !== 'over') return;
@@ -1652,10 +1659,12 @@ function sendLink(label, cls = '') {
 function sendToTile() {
   const B = BUNDLE; if (!B) { prepareBundle(); toast('Getting the games ready: tap again'); return false; }
   const go = !!(navigator.onLine && TILE_URL);
+  const nNew = B.ids.filter((id) => { const e = S.saved.find((x) => x.id === id); return e && e.status !== 'copied'; }).length, nOld = B.ids.length - nNew;
+  const what = !nOld ? plural(nNew, 'game') : !nNew ? `${nOld === 1 ? '1 game that was' : `${nOld} games that were`} already sent` : `${plural(nNew, 'new game')} and ${nOld} already sent`;
   let p; try { p = navigator.clipboard.writeText(B.text); } catch (e) { p = Promise.reject(e); }
   p.then(() => {
     B.ids.forEach((id) => { const e = S.saved.find((x) => x.id === id); if (e) { e.status = 'copied'; e.copied = Date.now(); } }); save(); renderAll(); if (S.ui.menu === 'saved') renderMenu();
-    toast(go ? `Copied ${plural(B.ids.length, 'game')}. In the tile: tap the box and Paste.` : `Copied ${plural(B.ids.length, 'game')}. When you're online, open the BG Play tile in Claude and paste.`, 5000);
+    toast(go ? `Copied ${what}. In the tile: tap the box and Paste.` : `Copied ${what}. When you're online, open the BG Play tile in Claude and paste.`, 5000);
   }).catch(() => showPasteOut(B.text));
   return go;
 }
